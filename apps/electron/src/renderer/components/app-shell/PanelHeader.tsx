@@ -103,7 +103,7 @@ export function PanelHeader({
       initial={false}
       animate={{ opacity: title ? 1 : 0 }}
       transition={{ duration: 0.15 }}
-      className="flex items-center gap-1"
+      className="flex items-center gap-1 min-w-0"
     >
       <h1 className={cn(
         "text-sm font-semibold truncate font-sans leading-tight",
@@ -120,14 +120,13 @@ export function PanelHeader({
           {leadingAction}
         </div>
       )}
-      <div className="flex-1 min-w-0 flex items-center select-none">
-        <div className={cn("max-w-full overflow-hidden min-w-0", !leadingAction && "mx-auto")}>
+      <div className="flex-1 min-w-0 flex items-center justify-center select-none">
+        <div className={cn("max-w-full overflow-hidden min-w-0", !leadingAction && "mx-auto")} title={title || undefined}>
           {titleMenu ? (
             <DropdownMenu open={dropdownOpen} onOpenChange={setDropdownOpen}>
               {/* Wrapper button for the whole clickable area */}
               <button
                 onClick={() => setDropdownOpen(true)}
-                title={title || undefined}
                 className={cn(
                   "flex items-center gap-1 px-2 py-1 rounded-md titlebar-no-drag max-w-full min-w-0",
                   "hover:bg-foreground/[0.03] transition-colors",
