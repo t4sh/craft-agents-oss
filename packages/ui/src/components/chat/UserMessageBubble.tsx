@@ -11,7 +11,7 @@
  * - Pending/queued states (Electron only)
  */
 
-import { type ReactNode, useCallback, useState } from 'react'
+import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
 import type { StoredAttachment, ContentBadge } from '@craft-agent/core'
 import { normalizePath } from '@craft-agent/core/utils'
 import { cn } from '../../lib/utils'
@@ -335,16 +335,6 @@ export function UserMessageBubble({
   compactMode,
 }: UserMessageBubbleProps) {
   const { t } = useTranslation()
-  const [copied, setCopied] = useState(false)
-  const handleCopy = useCallback(async () => {
-    try {
-      await navigator.clipboard.writeText(content)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
-    } catch (err) {
-      console.error('Failed to copy:', err)
-    }
-  }, [content])
 
   const hasAttachments = attachments && attachments.length > 0
 
@@ -366,6 +356,33 @@ export function UserMessageBubble({
     }
     displayContent = displayContent.trim()
   }
+
+  const [copied, setCopied] = useState(false)
+  const copyResetTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => {
+    return () => {
+      if (copyResetTimeoutRef.current != null) {
+        clearTimeout(copyResetTimeoutRef.current)
+      }
+    }
+  }, [])
+
+  const handleCopy = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(displayContent)
+      if (copyResetTimeoutRef.current != null) {
+        clearTimeout(copyResetTimeoutRef.current)
+      }
+      setCopied(true)
+      copyResetTimeoutRef.current = setTimeout(() => {
+        copyResetTimeoutRef.current = null
+        setCopied(false)
+      }, 2000)
+    } catch (err) {
+      console.error('Failed to copy:', err)
+    }
+  }, [displayContent])
 
   return (
     <div className={cn("flex flex-col items-end gap-3 w-full", className)}>
@@ -438,7 +455,7 @@ export function UserMessageBubble({
       )}
 
       {/* Text content bubble with hover copy button */}
-      <div className="group/user-msg relative max-w-[80%]">
+      <div className="group/user-msg relative max-w-[80%] min-w-0">
         {!compactMode && (
           <button
             onClick={handleCopy}
@@ -455,7 +472,7 @@ export function UserMessageBubble({
         )}
         <div
           className={cn(
-            "bg-user-message-bubble rounded-[16px] break-words min-w-0 select-text [&_p]:m-0",
+            "bg-user-message-bubble rounded-[16px] break-words min-w-0 max-w-full select-text [&_p]:m-0",
             compactMode ? "px-4 py-2" : "px-5 py-3.5",
             isPending && "animate-shimmer"
           )}
