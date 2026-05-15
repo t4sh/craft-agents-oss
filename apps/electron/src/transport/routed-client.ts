@@ -100,8 +100,16 @@ export class RoutedClient implements RpcClient {
     // RPC handlers receive workspaceId as a method argument (not from connection context).
     // When routing to a remote server, the renderer's local workspace ID must be replaced
     // with the server's workspace ID so the handler can resolve the workspace.
+    // Handles both top-level string args (e.g., getSkills(workspaceId)) and
+    // object args with a workspaceId property (e.g., testAutomation({ workspaceId, ... })).
     const translatedArgs = (!isLocal && this.workspaceIdMapping)
-      ? args.map(arg => arg === this.workspaceIdMapping!.localId ? this.workspaceIdMapping!.remoteId : arg)
+      ? args.map(arg => {
+          if (arg === this.workspaceIdMapping!.localId) return this.workspaceIdMapping!.remoteId
+          if (arg && typeof arg === 'object' && 'workspaceId' in arg && arg.workspaceId === this.workspaceIdMapping!.localId) {
+            return { ...arg, workspaceId: this.workspaceIdMapping!.remoteId }
+          }
+          return arg
+        })
       : args
 
     const result = await target.invoke(channel, ...translatedArgs)
@@ -222,9 +230,13 @@ export class RoutedClient implements RpcClient {
     // stale recovery logic to refresh sessions that changed while no client
     // was watching this workspace.
     if (newClient !== this.localClient) {
-      const unsub = newClient.onConnectionStateChanged((state) => {
+      // `let` + optional-chaining: onConnectionStateChanged can fire its
+      // callback synchronously when the new client is already connected, which
+      // would put `unsub` in the TDZ if declared `const`.
+      let unsub: (() => void) | undefined
+      unsub = newClient.onConnectionStateChanged((state) => {
         if (state.status === 'connected') {
-          unsub()
+          unsub?.()
           newClient.emitReconnected(true)
         }
       })

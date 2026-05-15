@@ -24,6 +24,7 @@ import { debug } from '../utils/debug.ts';
  */
 export const SERVER_BUILD_ERRORS = {
   AUTH_REQUIRED: 'Authentication required',
+  TOKEN_EXPIRED: 'Token expired',
   CREDENTIALS_NEEDED: 'Credentials needed',
 } as const;
 
@@ -203,11 +204,30 @@ export class SourceServerBuilder {
       return createApiServer(config, getToken, sessionPath, summarize);
     }
 
+    // Generic OAuth APIs — use token getter with auto-refresh
+    // Order matters: provider-specific checks (google, slack) come first
+    if (authType === 'oauth') {
+      if (!source.config.isAuthenticated || !getToken) {
+        debug(`[SourceServerBuilder] Generic OAuth source ${source.config.slug} not authenticated`);
+        return null;
+      }
+      debug(`[SourceServerBuilder] Building generic OAuth API server for ${source.config.slug}`);
+      const config = this.buildApiConfig(source);
+      return createApiServer(config, getToken, sessionPath, summarize);
+    }
+
     // Public APIs (no auth) can be used immediately
     if (authType === 'none') {
       debug(`[SourceServerBuilder] Building public API server for ${source.config.slug}`);
       const config = this.buildApiConfig(source);
       return createApiServer(config, '', sessionPath, summarize);
+    }
+
+    // Renew-endpoint sources use a token getter for auto-refresh instead of a static credential
+    if (getToken && apiConfig.renewEndpoint) {
+      debug(`[SourceServerBuilder] Building API server for ${source.config.slug} (auth: ${authType}, renew-endpoint)`);
+      const config = this.buildApiConfig(source);
+      return createApiServer(config, getToken, sessionPath, summarize);
     }
 
     // API key/bearer/header/query/basic auth - use static credential
@@ -230,7 +250,9 @@ export class SourceServerBuilder {
     const config: ApiConfig = {
       name: source.config.slug,
       baseUrl: api.baseUrl,
-      documentation: source.guide?.raw || '',
+      // documentation is no longer inlined into the tool description (see #683
+      // and api-tools.ts:buildToolDescription). The model reads guide.md via
+      // the prerequisite-manager-enforced Read instead.
       defaultHeaders: api.defaultHeaders,
     };
 
@@ -247,6 +269,10 @@ export class SourceServerBuilder {
         break;
       case 'basic':
         config.auth = { type: 'basic' };
+        break;
+      case 'oauth':
+        // Generic OAuth tokens are sent as Bearer tokens
+        config.auth = { type: 'bearer', authScheme: api.authScheme ?? 'Bearer' };
         break;
       case 'none':
       default:

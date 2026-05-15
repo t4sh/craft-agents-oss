@@ -64,7 +64,7 @@ export interface ToolDisplayMeta {
 /**
  * Attachment type categories
  */
-export type AttachmentType = 'image' | 'text' | 'pdf' | 'office' | 'unknown';
+export type AttachmentType = 'image' | 'text' | 'pdf' | 'office' | 'audio' | 'unknown';
 
 /**
  * Attachment preview for display in user messages (runtime, before storage)
@@ -299,6 +299,13 @@ export interface Message {
   errorDetails?: string[];
   errorOriginal?: string;
   errorCanRetry?: boolean;
+  errorActions?: Array<{
+    key: string;
+    label: string;
+    action?: 'retry' | 'settings' | 'reauth' | 'open_url' | 'reconnect_source';
+    url?: string;
+    sourceSlug?: string;
+  }>;
   // Plan-specific fields (for role='plan')
   planPath?: string;  // Path to the plan markdown file
   // Auth-request-specific fields (for role='auth-request')
@@ -371,6 +378,13 @@ export interface StoredMessage {
   errorDetails?: string[];
   errorOriginal?: string;
   errorCanRetry?: boolean;
+  errorActions?: Array<{
+    key: string;
+    label: string;
+    action?: 'retry' | 'settings' | 'reauth' | 'open_url' | 'reconnect_source';
+    url?: string;
+    sourceSlug?: string;
+  }>;
   // Plan-specific fields (for role='plan')
   planPath?: string;
   // Auth-request-specific fields (for role='auth-request')
@@ -422,7 +436,11 @@ export interface RecoveryAction {
   /** Slash command to execute (e.g., '/settings') */
   command?: string;
   /** Custom action type for special handling */
-  action?: 'retry' | 'settings' | 'reauth';
+  action?: 'retry' | 'settings' | 'reauth' | 'open_url' | 'reconnect_source';
+  /** URL to open (for open_url action) */
+  url?: string;
+  /** Source slug (for reconnect_source action) */
+  sourceSlug?: string;
 }
 
 /**
@@ -448,6 +466,9 @@ export type ErrorCode =
   | 'invalid_request'        // API rejected the request (e.g., bad image, invalid content)
   | 'image_too_large'        // Image exceeds API dimension/size limits
   | 'provider_error'         // AI provider experiencing issues (overloaded, unavailable)
+  | 'queued_message_replay_failed'  // A message queued during an active turn could not be auto-replayed (#616)
+  | 'sdk_binary_missing'     // SDK subprocess binary not present on disk (incomplete bundle)
+  | 'sdk_cwd_missing'        // SDK subprocess cwd not present on disk (stale cross-machine import)
   | 'unknown_error';
 
 /**

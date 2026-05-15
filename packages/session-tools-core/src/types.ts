@@ -232,7 +232,7 @@ export type McpAuthType = 'oauth' | 'bearer' | 'none';
 /**
  * API auth type
  */
-export type ApiAuthType = 'bearer' | 'header' | 'query' | 'basic' | 'none';
+export type ApiAuthType = 'bearer' | 'header' | 'query' | 'basic' | 'oauth' | 'none';
 
 /**
  * MCP source configuration block
@@ -276,6 +276,16 @@ export interface ApiSourceConfig {
   slackService?: SlackService;
   // Microsoft OAuth
   microsoftService?: MicrosoftService;
+  // Generic OAuth config (when authType is 'oauth' and provider is not google/slack/microsoft)
+  oauth?: {
+    authorizationUrl: string;
+    tokenUrl: string;
+    clientId: string;
+    clientSecret?: string;
+    scopes?: string[];
+    audience?: string;
+    extraParams?: Record<string, string>;
+  };
 }
 
 /**
@@ -305,7 +315,7 @@ export interface SourceConfig {
   api?: ApiSourceConfig;
   local?: LocalSourceConfig;
   isAuthenticated?: boolean;
-  lastTestedAt?: string; // ISO date string
+  lastTestedAt?: number; // millisecond timestamp
   createdAt?: number;
   updatedAt?: number;
   // Display fields

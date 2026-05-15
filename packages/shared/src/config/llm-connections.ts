@@ -41,18 +41,15 @@ export function registerPiModelResolver(resolver: PiModelResolver): void {
  * Provider type determines which backend/SDK implementation to use.
  * This is separate from auth mechanism - a provider may support multiple auth types.
  *
- * - 'anthropic': Direct Anthropic API (api.anthropic.com)
- * - 'anthropic_compat': Anthropic-format compatible endpoints (OpenRouter, etc.)
- * - 'bedrock': AWS Bedrock (Claude models via AWS)
- * - 'vertex': Google Vertex AI (Claude models via GCP)
+ * - 'anthropic': Direct Anthropic API (api.anthropic.com) — uses Claude Agent SDK
  * - 'pi': Pi unified LLM API (20+ providers via @mariozechner/pi-ai)
- * - 'pi_compat': Pi with custom endpoint (Ollama, self-hosted models)
+ * - 'pi_compat': Pi with custom endpoint (Ollama, self-hosted models, Anthropic-compat endpoints)
+ *
+ * Legacy values (bedrock, vertex, anthropic_compat) are migrated on startup
+ * by migrateLegacyProviderTypes() in storage.ts.
  */
 export type LlmProviderType =
   | 'anthropic'
-  | 'anthropic_compat'
-  | 'bedrock'
-  | 'vertex'
   | 'pi'
   | 'pi_compat';
 
@@ -110,7 +107,25 @@ export type CustomEndpointApi = 'openai-completions' | 'anthropic-messages';
  */
 export interface CustomEndpointConfig {
   api: CustomEndpointApi;
+  /** Explicit capability hint for arbitrary endpoints — never guessed automatically. */
+  supportsImages?: boolean;
 }
+
+/**
+ * Per-connection behavior when the user sends a message while the agent is
+ * still streaming/processing a previous turn.
+ *
+ * - 'steer': Try to deliver the message into the in-flight turn (Pi's native
+ *   `.steer()` or Claude's PreToolUse `additionalContext` hook). Falls back to
+ *   abort+queue when the backend can't steer.
+ * - 'queue': Hold the message; let the current turn finish naturally; replay
+ *   as a new turn afterwards. No abort, no destructive interruption.
+ *
+ * Default is per-`providerType` via {@link defaultMidStreamBehavior}; reads
+ * everywhere should go through {@link resolveMidStreamBehavior} so connections
+ * created before this field existed still pick up the right default.
+ */
+export type MidStreamBehavior = 'steer' | 'queue';
 
 /**
  * LLM Connection configuration.
@@ -165,16 +180,13 @@ export interface LlmConnection {
    */
   customEndpoint?: CustomEndpointConfig;
 
-  // --- Cloud provider specific fields ---
-
-  /** AWS region (for 'bedrock' provider) */
-  awsRegion?: string;
-
-  /** GCP project ID (for 'vertex' provider) */
-  gcpProjectId?: string;
-
-  /** GCP region (for 'vertex' provider, e.g., 'us-central1') */
-  gcpRegion?: string;
+  /**
+   * Behavior when the user sends a message while the agent is still streaming.
+   * Optional for backward compat with config.json from before this field existed —
+   * read via {@link resolveMidStreamBehavior} which falls back to a per-provider
+   * default ({@link defaultMidStreamBehavior}).
+   */
+  midStreamBehavior?: MidStreamBehavior;
 
   // --- Timestamps ---
 
@@ -205,18 +217,39 @@ export interface LlmConnectionWithStatus extends LlmConnection {
 // ============================================================
 
 /**
+ * Returns true when `modelId` must NOT be used as the mini/summarization model
+ * given the current auth flavor.
+ *
+ * - `codex-mini-latest` is always denied (Pi SDK rejects it outright).
+ * - When `piAuthProvider === 'openai-codex'` (ChatGPT Plus/Pro OAuth or
+ *   ChatGPT-JWT API key), all `*codex-mini*` variants (e.g. `gpt-5.1-codex-mini`)
+ *   are denied — the ChatGPT backend refuses them with: "The '<model>' model is
+ *   not supported when using Codex with a ChatGPT account."
+ *   A regular OpenAI API key uses provider `'openai'`, which is unaffected.
+ */
+export function isDeniedMiniModelId(modelId: string, piAuthProvider?: string): boolean {
+  const bare = modelId.startsWith('pi/') ? modelId.slice(3) : modelId;
+  if (bare === 'codex-mini-latest') return true;
+  if (piAuthProvider === 'openai-codex' && bare.includes('codex-mini')) return true;
+  return false;
+}
+
+/**
  * Get the mini/utility model ID for a connection.
  * Provider-aware search:
- *   - Anthropic (incl. bedrock/vertex): find any model with "haiku" in its id/name
- *   - OpenAI: find any model with "mini" in its id/name
+ *   - Anthropic: find any model with "haiku" in its id/name
+ *   - Pi: find any model with "mini" or "flash" in its id/name
  *   - Otherwise: last model in the list
  *
- * Used for mini agent, title generation, and mini completions.
+ * Auth-flavor-aware: skips models that the user's `piAuthProvider` would reject
+ * (e.g. `gpt-5.1-codex-mini` under ChatGPT-account auth). See
+ * {@link isDeniedMiniModelId}.
  *
- * @param connection - LLM connection (or partial with models + providerType)
- * @returns Model ID string, or undefined if no models available
+ * Used for mini agent, title generation, and mini completions.
  */
-export function getMiniModel(connection: Pick<LlmConnection, 'models' | 'providerType'>): string | undefined {
+export function getMiniModel(
+  connection: Pick<LlmConnection, 'models' | 'providerType' | 'piAuthProvider'>,
+): string | undefined {
   return findSmallModel(connection);
 }
 
@@ -226,11 +259,10 @@ export function getMiniModel(connection: Pick<LlmConnection, 'models' | 'provide
  * so summarization and mini agent models can diverge independently.
  *
  * Used for response summarization and API tool summarization.
- *
- * @param connection - LLM connection (or partial with models + providerType)
- * @returns Model ID string, or undefined if no models available
  */
-export function getSummarizationModel(connection: Pick<LlmConnection, 'models' | 'providerType'>): string | undefined {
+export function getSummarizationModel(
+  connection: Pick<LlmConnection, 'models' | 'providerType' | 'piAuthProvider'>,
+): string | undefined {
   return findSmallModel(connection);
 }
 
@@ -238,11 +270,16 @@ export function getSummarizationModel(connection: Pick<LlmConnection, 'models' |
  * Provider-aware small model resolution.
  * Shared implementation for getMiniModel() and getSummarizationModel().
  *
- *   - Anthropic (incl. bedrock/vertex/compat): find "haiku"
+ *   - Anthropic: find "haiku"
  *   - Pi: find "mini" or "flash"
  *   - Otherwise: last model in the list
+ *
+ * Skips models denied by {@link isDeniedMiniModelId} for the connection's
+ * auth flavor.
  */
-function findSmallModel(connection: Pick<LlmConnection, 'models' | 'providerType'>): string | undefined {
+function findSmallModel(
+  connection: Pick<LlmConnection, 'models' | 'providerType' | 'piAuthProvider'>,
+): string | undefined {
   if (!connection.models || connection.models.length === 0) return undefined;
 
   const toId = (m: ModelDefinition | string) => typeof m === 'string' ? m : m.id;
@@ -250,12 +287,8 @@ function findSmallModel(connection: Pick<LlmConnection, 'models' | 'providerType
   const toSearchStr = (m: ModelDefinition | string) =>
     typeof m === 'string' ? m.toLowerCase() : `${m.id} ${m.name} ${m.shortName}`.toLowerCase();
 
-  const isDeniedSmallModel = (modelId: string): boolean => {
-    const bare = modelId.startsWith('pi/') ? modelId.slice(3) : modelId;
-    return bare === 'codex-mini-latest';
-  };
-
-  const isAllowedModel = (m: ModelDefinition | string): boolean => !isDeniedSmallModel(toId(m));
+  const isAllowedModel = (m: ModelDefinition | string): boolean =>
+    !isDeniedMiniModelId(toId(m), connection.piAuthProvider);
 
   // Provider-aware keyword search
   const keywords: string[] = [];
@@ -378,27 +411,35 @@ export function authTypeRequiresEndpoint(authType: LlmAuthType): boolean {
  * Check if a provider type is a "compat" provider.
  * Compat providers use custom endpoints and require explicit model lists.
  * @param providerType - Provider type to check
- * @returns true if this is a compat provider (anthropic_compat or pi_compat)
+ * @returns true if this is a compat provider (pi_compat)
  */
 export function isCompatProvider(providerType: LlmProviderType): boolean {
-  return providerType === 'anthropic_compat' || providerType === 'pi_compat';
+  return providerType === 'pi_compat';
 }
 
 /**
- * Check if a provider type uses Anthropic models (Claude).
- * Includes direct Anthropic, compat endpoints, and cloud providers (Bedrock, Vertex).
+ * Check if a provider type uses the Anthropic Claude Agent SDK.
+ * Only direct Anthropic API connections use the Claude SDK.
  * @param providerType - Provider type to check
- * @returns true if this provider uses Anthropic/Claude models
+ * @returns true if this provider uses the Anthropic SDK
  */
 export function isAnthropicProvider(providerType: LlmProviderType): boolean {
-  return (
-    providerType === 'anthropic' ||
-    providerType === 'anthropic_compat' ||
-    providerType === 'bedrock' ||
-    providerType === 'vertex'
-  );
+  return providerType === 'anthropic';
 }
 
+/**
+ * Check if a connection points to a local model runtime (loopback URL).
+ */
+export function isLocalConnection(conn: Pick<LlmConnection, 'baseUrl'>): boolean {
+  if (!conn.baseUrl?.trim()) return false;
+  try {
+    const hostname = new URL(conn.baseUrl.trim()).hostname;
+    const h = hostname.startsWith('[') && hostname.endsWith(']') ? hostname.slice(1, -1) : hostname;
+    return h === 'localhost' || h === '127.0.0.1' || h === '::1';
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Check if a provider type uses Pi unified API.
@@ -407,6 +448,106 @@ export function isAnthropicProvider(providerType: LlmProviderType): boolean {
  */
 export function isPiProvider(providerType: LlmProviderType): boolean {
   return providerType === 'pi' || providerType === 'pi_compat';
+}
+
+/**
+ * Default mid-stream send behavior for a given provider type.
+ *
+ * - 'anthropic' → 'queue': Claude's emulated steer (PreToolUse hook injection)
+ *   has a real failure mode — if no tool fires before the turn ends, the steer
+ *   becomes `steer_undelivered` and gets re-queued anyway, paying for the
+ *   original turn's tokens for nothing. Default to queue for predictability.
+ * - 'pi' / 'pi_compat' → 'steer': Pi's native `.steer()` is non-destructive
+ *   (delivers after the current tool finishes, keeps full context). No
+ *   downside to defaulting to immediate steering.
+ */
+export function defaultMidStreamBehavior(providerType: LlmProviderType): MidStreamBehavior {
+  return providerType === 'anthropic' ? 'queue' : 'steer';
+}
+
+/**
+ * Read the effective mid-stream behavior for a connection.
+ *
+ * Single source of truth — every call site that needs to decide steer-vs-queue
+ * should go through here so legacy connections (created before the field
+ * existed) and connections with corrupt/unexpected values fall through to the
+ * provider-appropriate default.
+ */
+export function resolveMidStreamBehavior(
+  connection: Pick<LlmConnection, 'midStreamBehavior' | 'providerType'>,
+): MidStreamBehavior {
+  if (connection.midStreamBehavior === 'steer' || connection.midStreamBehavior === 'queue') {
+    return connection.midStreamBehavior;
+  }
+  return defaultMidStreamBehavior(connection.providerType);
+}
+
+/**
+ * Return a new LlmConnection with the given model's `supportsImages` override set.
+ *
+ * Centralizes the string-vs-object normalization for `connection.models[]`:
+ *   - string entry → promoted to `{ id, name, shortName, supportsImages: enabled }`
+ *   - object entry → only `supportsImages` is updated
+ *   - model not in array → connection returned unchanged (defensive)
+ *
+ * Pure function — does not mutate the input. Storage round-trip is handled
+ * upstream via `saveLlmConnection`. The stored object form for custom-endpoint
+ * models is `{ id, name?, shortName?, contextWindow?, supportsImages? }`
+ * (passthrough-validated by the storage schema). `name` and `shortName` default
+ * to the model's `id` when promoting so that downstream renderer surfaces that
+ * read `m.name` (the trigger button display, picker row labels) keep showing a
+ * label after the toggle promotes a string entry. The `ModelDefinition` cast
+ * matches the existing shape produced by `ApiKeyInput.tsx` and the Pi driver.
+ */
+export function setModelSupportsImages(
+  connection: LlmConnection,
+  modelId: string,
+  enabled: boolean,
+): LlmConnection {
+  if (!connection.models) return connection;
+  const idOf = (m: ModelDefinition | string) => (typeof m === 'string' ? m : m.id);
+  const idx = connection.models.findIndex(m => idOf(m) === modelId);
+  if (idx === -1) return connection;
+
+  const entry = connection.models[idx]!;
+  const nextEntry =
+    typeof entry === 'string'
+      ? { id: entry, name: entry, shortName: entry, supportsImages: enabled }
+      : { ...entry, supportsImages: enabled };
+
+  const nextModels = connection.models.slice();
+  nextModels[idx] = nextEntry as ModelDefinition;
+  return { ...connection, models: nextModels };
+}
+
+/**
+ * Resolve whether a given model on a connection accepts image input.
+ *
+ * For `pi_compat` (custom-endpoint) connections this mirrors the precedence used
+ * by Pi's `buildCustomEndpointModelDef`:
+ *   per-model `supportsImages` override
+ *   ?? connection-level `customEndpoint.supportsImages` default
+ *   ?? false
+ *
+ * For non-`pi_compat` connections the renderer doesn't own the catalog — Pi SDK's
+ * bundled provider definitions and Anthropic's API do. This helper conservatively
+ * returns `true` there (we don't know better; the upstream decides). The
+ * pre-flight banner gates on `pi_compat` separately, so this just reports what
+ * the renderer can know with confidence.
+ */
+export function modelSupportsImages(
+  connection: Pick<LlmConnection, 'providerType' | 'models' | 'customEndpoint'>,
+  modelId: string,
+): boolean {
+  if (!isCompatProvider(connection.providerType)) return true;
+
+  const entry = connection.models?.find(m =>
+    (typeof m === 'string' ? m : m.id) === modelId,
+  );
+  if (entry && typeof entry !== 'string' && typeof entry.supportsImages === 'boolean') {
+    return entry.supportsImages;
+  }
+  return connection.customEndpoint?.supportsImages ?? false;
 }
 
 /**
@@ -428,10 +569,7 @@ export function getModelsForProviderType(providerType: LlmProviderType, piAuthPr
     return _piModelResolver(piAuthProvider);
   }
 
-  // Anthropic, Bedrock, Vertex use Claude models with bare Anthropic IDs.
-  // Note: providerType==='bedrock' goes through ClaudeAgent → Anthropic API,
-  // which requires bare IDs. Pi+amazon-bedrock goes through PiAgent and
-  // gets Bedrock-native IDs via the Pi SDK model resolver.
+  // Anthropic uses Claude models with bare Anthropic IDs.
   return ANTHROPIC_MODELS;
 }
 
@@ -455,33 +593,53 @@ export function getModelsForProviderType(providerType: LlmProviderType, piAuthPr
  * Format: bare model IDs (without pi/ prefix). Matched against pi/{id} or pi/{id}-*.
  */
 export const PI_PREFERRED_DEFAULTS: Record<string, string[]> = {
-  anthropic: ['claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5'],
-  openai: ['gpt-5.2', 'gpt-5.1', 'gpt-5', 'o4-mini', 'o3', 'gpt-4o'],
-  'openai-codex': ['gpt-5.2', 'gpt-5.1', 'gpt-5', 'o4-mini', 'o3', 'gpt-4o'],
-  google: ['gemini-3-pro-preview', 'gemini-3-flash-preview', 'gemini-3.1-flash-lite-preview', 'gemini-2.5-pro', 'gemini-2.5-flash'],
+  // TODO(opus-4.6-sunset): drop 'claude-opus-4-6' from anthropic and amazon-bedrock
+  // when Opus 4.6 is deprecated.
+  anthropic: ['claude-opus-4-7', 'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5'],
+  openai: ['gpt-5.5', 'gpt-5.2', 'gpt-5.1', 'gpt-5', 'o4-mini', 'o3', 'gpt-4o'],
+  'openai-codex': ['gpt-5.5', 'gpt-5.2', 'gpt-5.1', 'gpt-5', 'o4-mini', 'o3', 'gpt-4o'],
+  // Stable models first so the connection-setup test (which uses
+  // getDefaultModelForConnection) lands on a reliable model.
+  // gemini-3-pro-preview and gemini-3.1-pro-preview are intermittently
+  // unresponsive on generateContent — verified against the live API in
+  // April 2026 — and are deliberately excluded from defaults.
+  google: ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-3-flash-preview', 'gemini-3.1-flash-lite-preview'],
+  deepseek: ['deepseek-v4-pro', 'deepseek-v4-flash'],
   'github-copilot': ['claude-sonnet-4-6', 'gpt-5', 'o4-mini', 'claude-haiku-4-5'],
-  'amazon-bedrock': ['us.anthropic.claude-opus-4-6-v1', 'us.anthropic.claude-sonnet-4-6', 'us.anthropic.claude-haiku-4-5-20251001-v1:0'],
+  'amazon-bedrock': ['claude-opus-4-7', 'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5'],
 };
 
 export function getDefaultModelsForConnection(providerType: LlmProviderType, piAuthProvider?: string): Array<ModelDefinition | string> {
   if (providerType === 'pi') {
     const models = _piModelResolver(piAuthProvider);
-    // Sort preferred defaults first so getDefaultModelForConnection picks a modern model
+    // Sort preferred defaults first so getDefaultModelForConnection picks a modern model.
+    // For Bedrock models, the Pi SDK returns IDs like pi/us.anthropic.claude-opus-4-7-v1
+    // but preferred defaults use bare IDs (claude-opus-4-7). We match via both direct
+    // comparison and reverse Bedrock ID mapping.
     const preferred = (piAuthProvider && PI_PREFERRED_DEFAULTS[piAuthProvider]) || [];
     if (preferred.length > 0) {
+      const findPreferredIndex = (id: string): number => {
+        const bare = id.startsWith('pi/') ? id.slice(3) : id
+        // Try direct match first (works for non-Bedrock providers)
+        const direct = preferred.findIndex(p => bare === p || bare.startsWith(`${p}-`))
+        if (direct >= 0) return direct
+        // For Bedrock: reverse-map native ID to bare, then match
+        const reversed = fromBedrockNativeId(bare)
+        if (reversed !== bare) {
+          return preferred.findIndex(p => reversed === p || reversed.startsWith(`${p}-`))
+        }
+        return -1
+      }
       models.sort((a, b) => {
-        const aIdx = preferred.findIndex(p => a.id === `pi/${p}` || a.id.startsWith(`pi/${p}-`));
-        const bIdx = preferred.findIndex(p => b.id === `pi/${p}` || b.id.startsWith(`pi/${p}-`));
-        const aPrio = aIdx >= 0 ? aIdx : preferred.length;
-        const bPrio = bIdx >= 0 ? bIdx : preferred.length;
-        return aPrio - bPrio;
+        const aPrio = findPreferredIndex(a.id) ?? preferred.length;
+        const bPrio = findPreferredIndex(b.id) ?? preferred.length;
+        return (aPrio >= 0 ? aPrio : preferred.length) - (bPrio >= 0 ? bPrio : preferred.length);
       });
     }
     return models;
   }
   if (providerType === 'pi_compat') return [];  // Dynamic — user specifies
-  if (providerType === 'anthropic_compat') return [];  // Dynamic — user specifies
-  // anthropic, bedrock, vertex
+  // anthropic
   return ANTHROPIC_MODELS;
 }
 
@@ -566,10 +724,7 @@ export function isValidProviderAuthCombination(
 ): boolean {
   const validCombinations: Record<LlmProviderType, LlmAuthType[]> = {
     anthropic: ['api_key', 'oauth'],
-    anthropic_compat: ['api_key_with_endpoint'],
-    bedrock: ['bearer_token', 'iam_credentials', 'environment'],
-    vertex: ['oauth', 'service_account_file', 'environment'],
-    pi: ['api_key', 'oauth', 'none'],
+    pi: ['api_key', 'oauth', 'iam_credentials', 'environment', 'none'],
     pi_compat: ['api_key_with_endpoint', 'none'],
   };
 
@@ -585,13 +740,15 @@ export function isValidProviderAuthCombination(
  * Source: Pi SDK registry (models.generated.js) — us.* variants
  */
 const BEDROCK_MODEL_MAP: Record<string, string> = {
-  'claude-opus-4-6': 'us.anthropic.claude-opus-4-6-v1',
+  'claude-opus-4-7': 'us.anthropic.claude-opus-4-7-v1',
   'claude-sonnet-4-6': 'us.anthropic.claude-sonnet-4-6',
   'claude-haiku-4-5-20251001': 'us.anthropic.claude-haiku-4-5-20251001-v1:0',
   // Older models (for migration of existing connections)
+  'claude-opus-4-6': 'us.anthropic.claude-opus-4-6-v1',
   'claude-opus-4-5-20251101': 'us.anthropic.claude-opus-4-5-20251101-v1:0',
   'claude-sonnet-4-5-20250929': 'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
   // Also map base IDs (without region prefix) to US inference profiles
+  'anthropic.claude-opus-4-7-v1': 'us.anthropic.claude-opus-4-7-v1',
   'anthropic.claude-opus-4-6-v1': 'us.anthropic.claude-opus-4-6-v1',
   'anthropic.claude-sonnet-4-6': 'us.anthropic.claude-sonnet-4-6',
   'anthropic.claude-haiku-4-5-20251001-v1:0': 'us.anthropic.claude-haiku-4-5-20251001-v1:0',
@@ -602,32 +759,55 @@ const BEDROCK_MODEL_MAP: Record<string, string> = {
 /** Reverse map: all known Bedrock ID variants → bare Anthropic ID */
 const BEDROCK_REVERSE_MAP: Record<string, string> = {
   // US inference profiles
-  'us.anthropic.claude-opus-4-6-v1': 'claude-opus-4-6',
+  'us.anthropic.claude-opus-4-7-v1': 'claude-opus-4-7',
   'us.anthropic.claude-sonnet-4-6': 'claude-sonnet-4-6',
   'us.anthropic.claude-haiku-4-5-20251001-v1:0': 'claude-haiku-4-5-20251001',
+  'us.anthropic.claude-opus-4-6-v1': 'claude-opus-4-6',
   'us.anthropic.claude-opus-4-5-20251101-v1:0': 'claude-opus-4-5-20251101',
   'us.anthropic.claude-sonnet-4-5-20250929-v1:0': 'claude-sonnet-4-5-20250929',
   // EU inference profiles
-  'eu.anthropic.claude-opus-4-6-v1': 'claude-opus-4-6',
+  'eu.anthropic.claude-opus-4-7-v1': 'claude-opus-4-7',
   'eu.anthropic.claude-sonnet-4-6': 'claude-sonnet-4-6',
   'eu.anthropic.claude-haiku-4-5-20251001-v1:0': 'claude-haiku-4-5-20251001',
+  'eu.anthropic.claude-opus-4-6-v1': 'claude-opus-4-6',
   'eu.anthropic.claude-opus-4-5-20251101-v1:0': 'claude-opus-4-5-20251101',
   'eu.anthropic.claude-sonnet-4-5-20250929-v1:0': 'claude-sonnet-4-5-20250929',
   // Global inference profiles
-  'global.anthropic.claude-opus-4-6-v1': 'claude-opus-4-6',
+  'global.anthropic.claude-opus-4-7-v1': 'claude-opus-4-7',
   'global.anthropic.claude-sonnet-4-6': 'claude-sonnet-4-6',
   'global.anthropic.claude-haiku-4-5-20251001-v1:0': 'claude-haiku-4-5-20251001',
+  'global.anthropic.claude-opus-4-6-v1': 'claude-opus-4-6',
   // Base IDs (no region prefix)
-  'anthropic.claude-opus-4-6-v1': 'claude-opus-4-6',
+  'anthropic.claude-opus-4-7-v1': 'claude-opus-4-7',
   'anthropic.claude-sonnet-4-6': 'claude-sonnet-4-6',
   'anthropic.claude-haiku-4-5-20251001-v1:0': 'claude-haiku-4-5-20251001',
+  'anthropic.claude-opus-4-6-v1': 'claude-opus-4-6',
   'anthropic.claude-opus-4-5-20251101-v1:0': 'claude-opus-4-5-20251101',
   'anthropic.claude-sonnet-4-5-20250929-v1:0': 'claude-sonnet-4-5-20250929',
 }
 
-/** Map a bare Anthropic model ID to its Bedrock-native equivalent. Pass-through if already native or unknown. */
-export function toBedrockNativeId(modelId: string): string {
-  return BEDROCK_MODEL_MAP[modelId] ?? modelId
+/**
+ * Derive the Bedrock inference profile region prefix from an AWS region string.
+ * Returns 'us', 'eu', or 'us' (default fallback for regions without inference profiles).
+ */
+export function deriveBedrockRegionPrefix(awsRegion?: string): string {
+  if (!awsRegion) return 'us'
+  if (awsRegion.startsWith('eu-')) return 'eu'
+  // US regions and all others (ap-*, me-*, etc.) use US inference profiles
+  return 'us'
+}
+
+/**
+ * Map a bare Anthropic model ID to its Bedrock-native equivalent.
+ * Uses the specified region prefix (default: 'us') for inference profile IDs.
+ * Pass-through if already native or unknown.
+ */
+export function toBedrockNativeId(modelId: string, regionPrefix?: string): string {
+  const nativeId = BEDROCK_MODEL_MAP[modelId]
+  if (!nativeId) return modelId
+  if (!regionPrefix || regionPrefix === 'us') return nativeId
+  // BEDROCK_MODEL_MAP stores us.* variants — swap the region prefix
+  return nativeId.replace(/^us\./, `${regionPrefix}.`)
 }
 
 /** Map a Bedrock-native model ID back to its bare Anthropic equivalent. Pass-through if already bare or unknown. */
@@ -642,10 +822,11 @@ export function fromBedrockNativeId(modelId: string): string {
  */
 export function normalizeBedrockModelId(
   modelId: string | undefined,
+  regionPrefix?: string,
 ): string {
   if (!modelId) return '';
   const bare = modelId.startsWith('pi/') ? modelId.slice(3) : modelId
-  return toBedrockNativeId(bare)
+  return toBedrockNativeId(bare, regionPrefix)
 }
 
 // ============================================================
@@ -801,74 +982,6 @@ export async function resolveAuthEnvVars(
     return { envVars, success: true };
   }
 
-  if (connection.providerType === 'bedrock') {
-    // Bedrock is handled by the Pi SDK in product architecture.
-    // Do not enable Claude SDK Bedrock routing here.
-
-    if (connection.baseUrl) {
-      envVars.ANTHROPIC_BEDROCK_BASE_URL = connection.baseUrl
-    }
-
-    const configuredRegion =
-      connection.awsRegion ||
-      getRuntimeEnvValue('AWS_REGION') ||
-      getRuntimeEnvValue('AWS_DEFAULT_REGION')
-    if (!configuredRegion) {
-      return {
-        envVars,
-        success: false,
-        warning: `No AWS region found for Bedrock connection: ${connectionSlug}`,
-      }
-    }
-
-    envVars.AWS_REGION = configuredRegion
-
-    if (connection.authType === 'bearer_token') {
-      const bearerToken = await credentialManager.getLlmApiKey(connectionSlug)
-      if (!bearerToken) {
-        return {
-          envVars,
-          success: false,
-          warning: `No Bedrock bearer token found for: ${connectionSlug}`,
-        }
-      }
-
-      envVars.AWS_BEARER_TOKEN_BEDROCK = bearerToken
-      return { envVars, success: true }
-    }
-
-    if (connection.authType === 'iam_credentials') {
-      const iamCredentials =
-        await credentialManager.getLlmIamCredentials(connectionSlug)
-      if (!iamCredentials?.accessKeyId || !iamCredentials.secretAccessKey) {
-        return {
-          envVars,
-          success: false,
-          warning: `No IAM credentials found for: ${connectionSlug}`,
-        }
-      }
-
-      envVars.AWS_ACCESS_KEY_ID = iamCredentials.accessKeyId
-      envVars.AWS_SECRET_ACCESS_KEY = iamCredentials.secretAccessKey
-      if (iamCredentials.sessionToken) {
-        envVars.AWS_SESSION_TOKEN = iamCredentials.sessionToken
-      }
-      envVars.AWS_REGION = iamCredentials.region || configuredRegion
-
-      return { envVars, success: true }
-    }
-
-    if (connection.authType === 'environment') {
-      return { envVars, success: true }
-    }
-
-    return {
-      envVars,
-      success: false,
-      warning: `Unsupported Bedrock auth type: ${connection.authType}`,
-    }
-  }
-
   // Set base URL if configured
   if (connection.baseUrl) {
     envVars.ANTHROPIC_BASE_URL = connection.baseUrl;
@@ -896,7 +1009,7 @@ export async function resolveAuthEnvVars(
         return { envVars, success: false, warning: `Failed to get OAuth token for: ${connectionSlug}` };
       }
     } else {
-      // Non-Anthropic OAuth (e.g. anthropic_compat with OAuth)
+      // Fallback OAuth path (should not be reached after legacy migration)
       const llmOAuth = await credentialManager.getLlmOAuth(connectionSlug);
       if (llmOAuth?.accessToken) {
         envVars.CLAUDE_CODE_OAUTH_TOKEN = llmOAuth.accessToken;

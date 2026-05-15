@@ -3,28 +3,23 @@
  *
  * These error types map HTTP status codes and error patterns to
  * actionable error information that can be displayed to users.
+ *
+ * The `ErrorCode` union is owned by `@craft-agent/core` so the wire
+ * format (which crosses package boundaries) stays in one place; this
+ * file owns the user-facing text and recovery actions for each code.
  */
 
-export type ErrorCode =
-  | 'invalid_api_key'
-  | 'invalid_credentials'    // Generic credential issue (from diagnostics)
-  | 'expired_oauth_token'
-  | 'token_expired'          // Workspace token expired (from diagnostics)
-  | 'rate_limited'
-  | 'service_error'
-  | 'service_unavailable'    // Service unavailable (from diagnostics)
-  | 'network_error'
-  | 'proxy_error'           // Proxy/firewall/captive portal intercepted the request
-  | 'mcp_auth_required'
-  | 'mcp_unreachable'        // MCP server unreachable (from diagnostics)
-  | 'billing_error'          // HTTP 402 Payment Required
-  | 'model_no_tool_support'  // Model doesn't support tool/function calling
-  | 'invalid_model'          // Model ID not found
-  | 'data_policy_error'      // OpenRouter data policy restriction
-  | 'invalid_request'        // API rejected the request (e.g., bad image, invalid content)
-  | 'image_too_large'        // Image exceeds API dimension/size limits
-  | 'provider_error'         // AI provider experiencing issues (overloaded, unavailable)
-  | 'unknown_error';
+import type { ErrorCode } from '@craft-agent/core/types';
+import { getProviderMetadata } from '../config/provider-metadata.ts';
+
+export type { ErrorCode };
+
+/** Provider info attached to errors for user-facing context */
+export interface ProviderInfo {
+  name: string;
+  statusPageUrl?: string;
+  dashboardUrl?: string;
+}
 
 export interface RecoveryAction {
   /** Keyboard shortcut (single letter) */
@@ -34,7 +29,11 @@ export interface RecoveryAction {
   /** Slash command to execute (e.g., '/settings') */
   command?: string;
   /** Custom action type for special handling */
-  action?: 'retry' | 'settings' | 'reauth';
+  action?: 'retry' | 'settings' | 'reauth' | 'open_url' | 'reconnect_source';
+  /** URL to open (for 'open_url' action) */
+  url?: string;
+  /** Source slug (for 'reconnect_source' action) */
+  sourceSlug?: string;
 }
 
 export interface AgentError {
@@ -54,6 +53,8 @@ export interface AgentError {
   originalError?: string;
   /** Diagnostic check results for debugging */
   details?: string[];
+  /** Provider info for user-facing context */
+  providerInfo?: ProviderInfo;
 }
 
 /**
@@ -76,6 +77,14 @@ const ERROR_DEFINITIONS: Record<ErrorCode, Omit<AgentError, 'code' | 'originalEr
     ],
     canRetry: false,
   },
+  // response_too_large is set by the UI tool-result handler; parseError
+  // never produces it, but the union requires a definition entry.
+  response_too_large: {
+    title: 'Response Too Large',
+    message: 'The tool response was too large to display inline. The full output has been saved to disk.',
+    actions: [],
+    canRetry: false,
+  },
   expired_oauth_token: {
     title: 'Session Expired',
     message: 'Your session has expired. Please try signing in again.',
@@ -95,7 +104,7 @@ const ERROR_DEFINITIONS: Record<ErrorCode, Omit<AgentError, 'code' | 'originalEr
   },
   rate_limited: {
     title: 'Rate Limited',
-    message: 'Too many requests. Please wait a moment.',
+    message: 'Rate limit reached. Will auto-retry shortly.',
     actions: [
       { key: 'r', label: 'Retry', action: 'retry' },
     ],
@@ -104,7 +113,7 @@ const ERROR_DEFINITIONS: Record<ErrorCode, Omit<AgentError, 'code' | 'originalEr
   },
   service_error: {
     title: 'Service Error',
-    message: 'The AI service is temporarily unavailable.',
+    message: 'The AI service is temporarily unavailable. This usually resolves on its own.',
     actions: [
       { key: 'r', label: 'Retry', action: 'retry' },
     ],
@@ -122,7 +131,7 @@ const ERROR_DEFINITIONS: Record<ErrorCode, Omit<AgentError, 'code' | 'originalEr
   },
   network_error: {
     title: 'Connection Error',
-    message: 'Could not connect to the server. Check your internet connection.',
+    message: 'Could not reach the AI service. Check your internet connection or VPN settings.',
     actions: [
       { key: 'r', label: 'Retry', action: 'retry' },
     ],
@@ -204,16 +213,48 @@ const ERROR_DEFINITIONS: Record<ErrorCode, Omit<AgentError, 'code' | 'originalEr
   },
   provider_error: {
     title: 'AI Provider Error',
-    message: 'The AI provider is experiencing issues. This is not a problem with your setup.',
+    message: 'The AI provider is experiencing issues. This usually resolves on its own — retry in a moment.',
     actions: [
       { key: 'r', label: 'Retry', action: 'retry' },
     ],
     canRetry: true,
     retryDelayMs: 5000,
   },
+  queued_message_replay_failed: {
+    title: 'Queued message could not be sent',
+    message: 'A message you sent while the agent was running could not be re-sent automatically. Tap retry to send it now.',
+    actions: [
+      { key: 'r', label: 'Retry', action: 'retry' },
+    ],
+    canRetry: true,
+  },
+  sdk_binary_missing: {
+    title: 'Claude Code binary missing from app bundle',
+    message:
+      'The Claude Agent SDK binary expected on disk is not present. ' +
+      'This usually means the app bundle is incomplete (interrupted download, partial update, ' +
+      'or a security tool removed it). Reinstalling Craft Agents typically fixes this.',
+    actions: [
+      { key: 'r', label: 'Retry', action: 'retry' },
+    ],
+    canRetry: true,
+    retryDelayMs: 1000,
+  },
+  sdk_cwd_missing: {
+    title: 'Branch source unavailable on this machine',
+    message:
+      "The folder this branched session was forked from doesn't exist on this machine. " +
+      'This typically happens after importing a session from another workspace. ' +
+      'Retrying will start a fresh fork from a summary of the parent conversation.',
+    actions: [
+      { key: 'r', label: 'Retry', action: 'retry' },
+    ],
+    canRetry: true,
+    retryDelayMs: 1000,
+  },
   unknown_error: {
     title: 'Error',
-    message: 'An unexpected error occurred.',
+    message: 'Something went wrong. If this persists, check the provider status page or retry.',
     actions: [
       { key: 'r', label: 'Retry', action: 'retry' },
     ],
@@ -329,7 +370,10 @@ function buildProxyErrorMessage(errorMessage: string, fullErrorText: string): st
 /**
  * Parse an error and return a typed AgentError with user-friendly info
  */
-export function parseError(error: unknown): AgentError {
+export function parseError(
+  error: unknown,
+  providerContext?: { providerType?: string; piAuthProvider?: string },
+): AgentError {
   // Extract all error messages including nested causes and subprocess output
   const fullErrorText = extractErrorMessages(error);
   const errorMessage = error instanceof Error ? error.message : String(error);
@@ -356,7 +400,7 @@ export function parseError(error: unknown): AgentError {
     (lowerMessage.includes('tool') && lowerMessage.includes('not') && lowerMessage.includes('support'))
   ) {
     code = 'model_no_tool_support';
-  } else if (lowerMessage.includes('is not a valid model') || lowerMessage.includes('model not found') || lowerMessage.includes('invalid model')) {
+  } else if (lowerMessage.includes('is not a valid model') || lowerMessage.includes('model not found') || lowerMessage.includes('invalid model') || lowerMessage.includes('model identifier is invalid')) {
     code = 'invalid_model';
   // HTML-intercepted responses (proxy/firewall/captive portal).
   // Must be checked BEFORE status codes: a 502 Cloudflare page or 401 proxy login
@@ -397,7 +441,18 @@ export function parseError(error: unknown): AgentError {
     }
   }
 
-  const definition = ERROR_DEFINITIONS[code];
+  // ErrorCode is a finite union and ERROR_DEFINITIONS covers every member,
+  // so the lookup is exhaustive — non-null assert to satisfy the
+  // noUncheckedIndexedAccess compiler option after the cross-module import.
+  const definition = ERROR_DEFINITIONS[code]!;
+
+  // Resolve provider info from context
+  const providerInfo = providerContext
+    ? getProviderMetadata(
+        providerContext.providerType ?? 'anthropic',
+        providerContext.piAuthProvider,
+      ) ?? undefined
+    : undefined;
 
   // For proxy_error, prefer safe user-facing text over raw HTML payloads.
   if (code === 'proxy_error') {
@@ -406,6 +461,7 @@ export function parseError(error: unknown): AgentError {
       ...definition,
       message: buildProxyErrorMessage(errorMessage, fullErrorText),
       originalError: errorMessage,
+      providerInfo,
     };
   }
 
@@ -421,6 +477,7 @@ export function parseError(error: unknown): AgentError {
         ...definition,
         message: `Model "${modelMatch[1]}" does not support tool/function calling, which is required for Craft Agent. Please choose a different model with tool support in Settings.`,
         originalError: errorMessage,
+        providerInfo,
       };
     }
   }
@@ -429,6 +486,7 @@ export function parseError(error: unknown): AgentError {
     code,
     ...definition,
     originalError: errorMessage,
+    providerInfo,
   };
 }
 

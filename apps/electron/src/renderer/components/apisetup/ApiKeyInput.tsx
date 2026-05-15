@@ -11,6 +11,7 @@
  */
 
 import { useState, useEffect, useCallback, useRef } from "react"
+import { useTranslation } from "react-i18next"
 import { Command as CommandPrimitive } from "cmdk"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -24,6 +25,7 @@ import { cn } from "@/lib/utils"
 import { Check, ChevronDown, Eye, EyeOff, Loader2 } from "lucide-react"
 import { pickTierDefaults, resolveTierModels, type PiModelInfo } from "./tier-models"
 import {
+  resolveCustomEndpointPayload,
   resolvePiAuthProviderForSubmit,
   resolvePresetStateForBaseUrlChange,
   type PresetKey,
@@ -44,15 +46,15 @@ export interface ApiKeySubmitData {
   modelSelectionMode?: 'automaticallySyncedFromProvider' | 'userDefined3Tier'
   /** Custom endpoint protocol — set when user configures an arbitrary API endpoint */
   customEndpoint?: CustomEndpointConfig
-  /** Bedrock IAM credentials — set when user configures AWS IAM auth */
+  /** IAM credentials for Pi+Bedrock (piAuthProvider='amazon-bedrock') setup */
   iamCredentials?: {
     accessKeyId: string
     secretAccessKey: string
     sessionToken?: string
   }
-  /** AWS region for Bedrock */
+  /** AWS region for Pi+Bedrock */
   awsRegion?: string
-  /** Bedrock authentication method */
+  /** Bedrock authentication method — determines auth type for Pi+Bedrock connections */
   bedrockAuthMethod?: 'iam_credentials' | 'environment'
 }
 
@@ -101,6 +103,7 @@ const ANTHROPIC_PRESETS: Preset[] = [
   { key: 'amazon-bedrock', label: 'Amazon Bedrock', url: 'https://bedrock-runtime.us-east-1.amazonaws.com', placeholder: 'AKIA...' },
   { key: 'groq', label: 'Groq', url: 'https://api.groq.com/openai/v1', placeholder: 'gsk_...' },
   { key: 'mistral', label: 'Mistral', url: 'https://api.mistral.ai/v1', placeholder: 'Paste your key here...' },
+  { key: 'deepseek', label: 'DeepSeek', url: 'https://api.deepseek.com', placeholder: 'sk-...' },
   { key: 'xai', label: 'xAI (Grok)', url: 'https://api.x.ai/v1', placeholder: 'xai-...' },
   { key: 'cerebras', label: 'Cerebras', url: 'https://api.cerebras.ai/v1', placeholder: 'csk-...' },
   { key: 'zai', label: 'z.ai (GLM)', url: 'https://api.z.ai/api/coding/paas/v4', placeholder: 'Paste your key here...' },
@@ -109,8 +112,16 @@ const ANTHROPIC_PRESETS: Preset[] = [
   { key: 'minimax-cn', label: 'Minimax CN', url: 'https://api.minimaxi.com/anthropic', placeholder: 'Paste your key here...' },
   { key: 'kimi-coding', label: 'Kimi (Coding)', url: 'https://api.kimi.com/coding', placeholder: 'sk-kimi-...' },
   { key: 'vercel-ai-gateway', label: 'Vercel AI Gateway', url: 'https://ai-gateway.vercel.sh', placeholder: 'Paste your key here...' },
+  { key: 'manifest', label: 'Manifest', url: 'https://app.manifest.build/v1', placeholder: 'mnfst_...' },
   { key: 'custom', label: 'Custom', url: '', placeholder: 'Paste your key here...' },
 ]
+
+/**
+ * Presets without a Pi SDK provider entry that nonetheless expose a known
+ * OpenAI-compatible protocol. They behave like 'custom' on submit (customEndpoint
+ * gets pinned to openai-completions) but stay branded in the dropdown.
+ */
+const OPENAI_COMPAT_CUSTOM_URL_PRESETS: ReadonlySet<string> = new Set(['manifest'])
 
 // OpenAI provider presets - for Codex backend
 // Only direct OpenAI is supported; 3PP providers (OpenRouter, Vercel, Ollama) should be
@@ -134,7 +145,7 @@ const GOOGLE_PRESETS: Preset[] = [
 /** Presets that require the Pi SDK for authentication — hidden in Anthropic API Key mode */
 const PI_ONLY_PRESET_KEYS: ReadonlySet<string> = new Set(['minimax-global', 'minimax-cn'])
 
-const COMPAT_ANTHROPIC_DEFAULTS = 'claude-opus-4-6, claude-sonnet-4-6, claude-haiku-4-5'
+const COMPAT_ANTHROPIC_DEFAULTS = 'claude-opus-4-7, claude-sonnet-4-6, claude-haiku-4-5'
 const COMPAT_OPENAI_DEFAULTS = 'openai/gpt-5.2-codex, openai/gpt-5.1-codex-mini'
 const COMPAT_MINIMAX_DEFAULTS = 'MiniMax-M2.5, MiniMax-M2.5-highspeed'
 const COMPAT_KIMI_DEFAULTS = 'k2p5, kimi-k2-thinking'
@@ -181,6 +192,7 @@ export function ApiKeyInput({
   const initialPreset = initialValues?.activePreset
     ?? (initialValues?.baseUrl ? getPresetForUrl(initialValues.baseUrl, presets) : defaultPreset.key)
 
+  const { t } = useTranslation()
   const [apiKey, setApiKey] = useState(initialValues?.apiKey ?? '')
   const [showValue, setShowValue] = useState(false)
   const [baseUrl, setBaseUrl] = useState(initialValues?.baseUrl ?? defaultPreset.url)
@@ -230,7 +242,7 @@ export function ApiKeyInput({
   // Fetch Pi SDK models when a provider is selected in pi_api_key flow.
   // Returns all models sorted by cost (expensive-first) for the searchable tier dropdowns.
   const loadPiModels = useCallback(async (provider: string) => {
-    if (!isPiApiKeyFlow || !provider || provider === 'custom' || DEFAULT_ENDPOINT_PROVIDERS.has(provider)) {
+    if (!isPiApiKeyFlow || !provider || provider === 'custom' || DEFAULT_ENDPOINT_PROVIDERS.has(provider) || OPENAI_COMPAT_CUSTOM_URL_PRESETS.has(provider)) {
       setPiModels([])
       return
     }
@@ -282,7 +294,9 @@ export function ApiKeyInput({
       setConnectionDefaultModel(COMPAT_MINIMAX_DEFAULTS)
     } else if (preset.key === 'kimi-coding') {
       setConnectionDefaultModel(COMPAT_KIMI_DEFAULTS)
-    } else if (preset.key === 'custom') {
+    } else if (preset.key === 'manifest') {
+      setConnectionDefaultModel('auto')
+    } else if (preset.key === 'custom' || OPENAI_COMPAT_CUSTOM_URL_PRESETS.has(preset.key)) {
       setConnectionDefaultModel(providerType === 'openai' ? COMPAT_OPENAI_DEFAULTS : COMPAT_ANTHROPIC_DEFAULTS)
     } else {
       setConnectionDefaultModel('')
@@ -305,6 +319,8 @@ export function ApiKeyInput({
     if (!connectionDefaultModel.trim()) {
       if (presetKey === 'ollama') {
         setConnectionDefaultModel('qwen3-coder')
+      } else if (presetKey === 'manifest') {
+        setConnectionDefaultModel('auto')
       } else if (presetKey === 'minimax-global' || presetKey === 'minimax-cn') {
         setConnectionDefaultModel(COMPAT_MINIMAX_DEFAULTS)
       } else if (presetKey === 'kimi-coding') {
@@ -340,7 +356,8 @@ export function ApiKeyInput({
       return
     }
 
-    // Bedrock — submit with auth method and optional IAM credentials
+    // Bedrock — routes through Pi SDK with piAuthProvider='amazon-bedrock'.
+    // Submit with auth method and optional IAM credentials.
     if (isBedrock) {
       if (bedrockAuthMethod === 'iam_credentials' && !awsAccessKeyId.trim()) {
         setModelError('Access Key ID is required for IAM authentication.')
@@ -380,12 +397,16 @@ export function ApiKeyInput({
       return
     }
 
-    // Include custom endpoint protocol when user configured a custom base URL
-    const isCustomEndpoint = activePreset === 'custom' && !!effectiveBaseUrl
-    const customEndpoint = isCustomEndpoint ? { api: customApi } : undefined
-    const resolvedPiAuthProvider = isCustomEndpoint
-      ? (customApi === 'anthropic-messages' ? 'anthropic' : 'openai')
-      : effectivePiAuthProvider
+    // Include custom endpoint protocol when user configured a custom base URL.
+    // Branded openai-compat presets (e.g. Manifest) are pinned to openai-completions
+    // and routed via the Pi SDK's openai adapter.
+    const { customEndpoint, piAuthProvider: resolvedPiAuthProvider } = resolveCustomEndpointPayload({
+      activePreset,
+      baseUrl: effectiveBaseUrl,
+      customApi,
+      brandedOpenAiCompatPresets: OPENAI_COMPAT_CUSTOM_URL_PRESETS,
+      fallbackPiAuthProvider: effectivePiAuthProvider,
+    })
 
     onSubmit({
       apiKey: apiKey.trim(),
@@ -589,7 +610,7 @@ export function ApiKeyInput({
                     type={showValue ? 'text' : 'password'}
                     value={awsSecretAccessKey}
                     onChange={(e) => setAwsSecretAccessKey(e.target.value)}
-                    placeholder="Your secret access key"
+                    placeholder={t("apiSetup.secretAccessKey")}
                     className="pr-10 border-0 bg-transparent shadow-none"
                     disabled={isDisabled}
                   />
@@ -613,7 +634,7 @@ export function ApiKeyInput({
                     type="text"
                     value={awsSessionToken}
                     onChange={(e) => setAwsSessionToken(e.target.value)}
-                    placeholder="For temporary credentials (STS)"
+                    placeholder={t("apiSetup.temporaryCredentials")}
                     className="border-0 bg-transparent shadow-none"
                     disabled={isDisabled}
                   />
@@ -657,7 +678,7 @@ export function ApiKeyInput({
           {piModelsLoading ? (
             <div className="flex items-center gap-2 py-3 text-muted-foreground">
               <Loader2 className="size-3.5 animate-spin" />
-              <span className="text-xs">Loading models...</span>
+              <span className="text-xs">{t("apiSetup.loadingModels")}</span>
             </div>
           ) : (
             <>
@@ -719,7 +740,7 @@ export function ApiKeyInput({
                           ref={tierFilterInputRef}
                           value={tierFilter}
                           onValueChange={setTierFilter}
-                          placeholder="Search models..."
+                          placeholder={t("apiSetup.searchModels")}
                           autoFocus
                           className="w-full bg-transparent text-sm outline-none placeholder:text-muted-foreground placeholder:select-none"
                         />
@@ -782,7 +803,7 @@ export function ApiKeyInput({
                 setConnectionDefaultModel(e.target.value)
                 setModelError(null)
               }}
-              placeholder="e.g. claude-opus-4-6, claude-sonnet-4-6, claude-haiku-4-5"
+              placeholder="e.g. claude-opus-4-7, claude-sonnet-4-6, claude-haiku-4-5"
               className="border-0 bg-transparent shadow-none"
               disabled={isDisabled}
             />

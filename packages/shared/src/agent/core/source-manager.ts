@@ -1,9 +1,9 @@
 /**
  * SourceManager - Centralized Source State Management
  *
- * Provides a unified interface for managing external data source state that both
- * ClaudeAgent and CodexAgent can use. Handles source tracking, formatting for
- * context injection, and auto-activation detection.
+ * Provides a unified interface for managing external data source state that
+ * both ClaudeAgent and PiAgent can use. Handles source tracking, formatting
+ * for context injection, and auto-activation detection.
  *
  * Key responsibilities:
  * - Track active, inactive, and intended source states
@@ -367,6 +367,10 @@ export class SourceManager {
         case 'microsoft':
           return 'source_microsoft_oauth_trigger';
         default:
+          // Generic OAuth API sources → OAuth trigger (static config or auto-discovery)
+          if (api?.authType === 'oauth') {
+            return 'source_oauth_trigger';
+          }
           return 'source_credential_prompt';
       }
     }

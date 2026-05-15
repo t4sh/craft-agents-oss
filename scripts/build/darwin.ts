@@ -8,24 +8,26 @@ import { join } from 'path';
 import type { Arch, BuildConfig } from './common';
 
 /**
- * Verify SDK is bundled in the packaged macOS app
+ * Verify SDK native binary is bundled in the packaged macOS app.
+ * Since SDK 0.2.113 the SDK ships a per-platform native binary instead of cli.js.
  */
-export function verifyPackagedSDK(appPath: string, arch: Arch): void {
+export function verifyPackagedSDK(appPath: string, _arch: Arch): void {
   const appResourcesPath = join(appPath, 'Contents', 'Resources', 'app');
+  const binaryPath = join(
+    appResourcesPath,
+    'node_modules', '@anthropic-ai', 'claude-agent-sdk-binary', 'claude',
+  );
 
-  // Verify SDK
-  const sdkPath = join(appResourcesPath, 'node_modules', '@anthropic-ai', 'claude-agent-sdk', 'cli.js');
-
-  if (!existsSync(sdkPath)) {
-    throw new Error(`CRITICAL: SDK not bundled! Expected at: ${sdkPath}`);
+  if (!existsSync(binaryPath)) {
+    throw new Error(`CRITICAL: SDK native binary not bundled! Expected at: ${binaryPath}`);
   }
 
-  const stats = statSync(sdkPath);
-  if (stats.size < 1_000_000) {
-    throw new Error(`CRITICAL: SDK cli.js too small (${stats.size} bytes, expected ~11MB)`);
+  const stats = statSync(binaryPath);
+  if (stats.size < 50_000_000) {
+    throw new Error(`CRITICAL: SDK native binary too small (${stats.size} bytes, expected ~210 MB)`);
   }
 
-  console.log(`  SDK bundled: cli.js is ${(stats.size / 1024 / 1024).toFixed(1)} MB`);
+  console.log(`  SDK bundled: claude binary is ${(stats.size / 1024 / 1024).toFixed(1)} MB`);
 }
 
 /**
@@ -66,8 +68,8 @@ export async function packageDarwin(config: BuildConfig): Promise<string> {
   verifyPackagedSDK(appPath, arch);
 
   // Verify the DMG and ZIP were built (ZIP is used by electron-updater for auto-updates)
-  const dmgName = `Craft-Agent-${arch}.dmg`;
-  const zipName = `Craft-Agent-${arch}.zip`;
+  const dmgName = `Craft-Agents-${arch}.dmg`;
+  const zipName = `Craft-Agents-${arch}.zip`;
   const dmgPath = join(electronDir, 'release', dmgName);
   const zipPath = join(electronDir, 'release', zipName);
 

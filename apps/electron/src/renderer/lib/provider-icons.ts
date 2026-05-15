@@ -47,10 +47,10 @@ export type ProviderIconKey = keyof typeof providerIcons
 /** Human-readable provider names */
 const providerDisplayNames: Record<string, string> = {
   anthropic: 'Anthropic',
-  anthropic_compat: 'Anthropic',
   openai: 'OpenAI',
   openai_compat: 'OpenAI',
   copilot: 'GitHub Copilot',
+  deepseek: 'DeepSeek',
   kimi: 'Kimi',
   minimax: 'Minimax',
   ollama: 'Ollama',
@@ -70,6 +70,7 @@ export function getProviderDisplayName(providerType: string, baseUrl?: string | 
     if (url.includes('kimi.com')) return 'Kimi'
     if (url.includes('minimax.io') || url.includes('minimaxi.com')) return 'Minimax'
     if (url.includes('v0.dev') || url.includes('vercel')) return 'Vercel'
+    if (url.includes('manifest.build')) return 'Manifest'
   }
   return providerDisplayNames[providerType] || providerType
 }
@@ -142,12 +143,13 @@ const PI_AUTH_PROVIDER_DOMAINS: Record<string, string> = {
   groq: 'groq.com',
   xai: 'x.ai',
   cerebras: 'cerebras.ai',
+  deepseek: 'deepseek.com',
   zai: 'z.ai',
 }
 
 /**
  * Get provider icon URL for a given provider type and optional base URL.
- * Base URL detection takes precedence for compatible providers (openai_compat, anthropic_compat).
+ * Base URL detection takes precedence for compatible providers (openai_compat, pi_compat).
  * For Pi connections, resolves to the upstream provider's icon via piAuthProvider.
  *
  * @param providerType - The LLM provider type
@@ -161,17 +163,20 @@ export function getProviderIcon(
   piAuthProvider?: string | null
 ): string | null {
   // For compatible providers, try to detect from URL first
-  if (baseUrl && (providerType === 'openai_compat' || providerType === 'anthropic_compat')) {
+  if (baseUrl && (providerType === 'openai_compat' || providerType === 'pi_compat')) {
     const detectedProvider = detectProviderFromUrl(baseUrl)
     if (detectedProvider) {
       return providerIcons[detectedProvider]
+    }
+    // Manifest has no bundled SVG — fall back to Google Favicon V2 (same trick used for groq/xai elsewhere).
+    if (baseUrl.toLowerCase().includes('manifest.build')) {
+      return 'https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&size=128&url=https://app.manifest.build'
     }
   }
 
   // Map provider type to icon
   switch (providerType) {
     case 'anthropic':
-    case 'anthropic_compat':
       return providerIcons.anthropic
     case 'openai':
     case 'openai_compat':

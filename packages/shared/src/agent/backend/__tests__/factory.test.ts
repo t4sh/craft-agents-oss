@@ -178,18 +178,6 @@ describe('providerTypeToAgentProvider', () => {
     it('should map anthropic to anthropic', () => {
       expect(providerTypeToAgentProvider('anthropic')).toBe('anthropic');
     });
-
-    it('should map anthropic_compat to anthropic', () => {
-      expect(providerTypeToAgentProvider('anthropic_compat')).toBe('anthropic');
-    });
-
-    it('should map bedrock to anthropic (uses Anthropic SDK)', () => {
-      expect(providerTypeToAgentProvider('bedrock')).toBe('anthropic');
-    });
-
-    it('should map vertex to anthropic (uses Anthropic SDK)', () => {
-      expect(providerTypeToAgentProvider('vertex')).toBe('anthropic');
-    });
   });
 
   describe('Pi SDK providers', () => {
@@ -226,16 +214,6 @@ describe('isValidProviderAuthCombination', () => {
     });
   });
 
-  describe('Anthropic compat provider', () => {
-    it('should accept api_key_with_endpoint auth', () => {
-      expect(isValidProviderAuthCombination('anthropic_compat', 'api_key_with_endpoint')).toBe(true);
-    });
-
-    it('should reject plain api_key auth', () => {
-      expect(isValidProviderAuthCombination('anthropic_compat', 'api_key')).toBe(false);
-    });
-  });
-
   describe('Pi provider', () => {
     it('should accept api_key auth', () => {
       expect(isValidProviderAuthCombination('pi', 'api_key')).toBe(true);
@@ -260,33 +238,6 @@ describe('isValidProviderAuthCombination', () => {
     });
   });
 
-  describe('Bedrock provider', () => {
-    it('should accept bearer_token auth', () => {
-      expect(isValidProviderAuthCombination('bedrock', 'bearer_token')).toBe(true);
-    });
-
-    it('should accept iam_credentials auth', () => {
-      expect(isValidProviderAuthCombination('bedrock', 'iam_credentials')).toBe(true);
-    });
-
-    it('should accept environment auth', () => {
-      expect(isValidProviderAuthCombination('bedrock', 'environment')).toBe(true);
-    });
-  });
-
-  describe('Vertex provider', () => {
-    it('should accept oauth auth', () => {
-      expect(isValidProviderAuthCombination('vertex', 'oauth')).toBe(true);
-    });
-
-    it('should accept service_account_file auth', () => {
-      expect(isValidProviderAuthCombination('vertex', 'service_account_file')).toBe(true);
-    });
-
-    it('should accept environment auth', () => {
-      expect(isValidProviderAuthCombination('vertex', 'environment')).toBe(true);
-    });
-  });
 });
 
 describe('phase4 backend abstraction APIs', () => {
@@ -314,7 +265,7 @@ describe('phase4 backend abstraction APIs', () => {
     expect(resolveSetupTestConnectionHint({
       provider: 'anthropic',
       baseUrl: 'https://api.example.com',
-    })).toEqual({ providerType: 'anthropic_compat' });
+    })).toEqual({ providerType: 'pi_compat' });
 
     expect(resolveSetupTestConnectionHint({
       provider: 'anthropic',
@@ -360,25 +311,6 @@ describe('phase4 backend abstraction APIs', () => {
     expect(result.models.length).toBeGreaterThan(0);
   });
 
-  it('fetchBackendModels short-circuits unsupported anthropic discovery auth modes', async () => {
-    const connection: LlmConnection = {
-      slug: 'bedrock-test',
-      name: 'Bedrock Test',
-      providerType: 'bedrock',
-      authType: 'iam_credentials',
-      createdAt: Date.now(),
-    };
-
-    await expect(fetchBackendModels({
-      connection,
-      credentials: {},
-      hostRuntime: {
-        appRootPath: process.cwd(),
-        isPackaged: false,
-      },
-    })).rejects.toThrow('Dynamic model discovery not available for Bedrock/Vertex connections');
-  });
-
   it('validateStoredBackendConnection returns not found for unknown slug', async () => {
     const result = await validateStoredBackendConnection({
       slug: '__missing-connection__',
@@ -410,9 +342,9 @@ describe('phase4 backend abstraction APIs', () => {
 
 describe('ClaudeAgent model switching', () => {
   it('setModel updates getModel (regression: setModel used to write config.model but getModel reads _model)', () => {
-    const agent = createBackend(createTestConfig({ provider: 'anthropic', model: 'claude-opus-4-6' }));
+    const agent = createBackend(createTestConfig({ provider: 'anthropic', model: 'claude-opus-4-7' }));
 
-    expect(agent.getModel()).toBe('claude-opus-4-6');
+    expect(agent.getModel()).toBe('claude-opus-4-7');
 
     agent.setModel('claude-sonnet-4-6');
 

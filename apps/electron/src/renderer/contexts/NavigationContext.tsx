@@ -36,6 +36,7 @@ import {
   useMemo,
   type ReactNode,
 } from 'react'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { useAtomValue, useSetAtom, useStore } from 'jotai'
 import { useSession } from '@/hooks/useSession'
@@ -69,7 +70,6 @@ import {
   isAutomationsNavigation,
   DEFAULT_NAVIGATION_STATE,
 } from '../../shared/types'
-import { isValidSettingsSubpage, type SettingsSubpage } from '../../shared/settings-registry'
 import { sessionMetaMapAtom, updateSessionMetaAtom, type SessionMeta } from '@/atoms/sessions'
 import { sourcesAtom } from '@/atoms/sources'
 import { skillsAtom } from '@/atoms/skills'
@@ -121,7 +121,7 @@ interface NavigationContextValue {
   navigateToSession: (sessionId: string) => void
 }
 
-const NavigationContext = createContext<NavigationContextValue | null>(null)
+export const NavigationContext = createContext<NavigationContextValue | null>(null)
 
 interface NavigationProviderProps {
   children: ReactNode
@@ -160,6 +160,7 @@ export function NavigationProvider({
   isSessionsReady = true,
   remoteWorkspaceId,
 }: NavigationProviderProps) {
+  const { t } = useTranslation()
   const [, setSession] = useSession()
 
   // Read session metadata directly from atom (reactive to session changes)
@@ -874,21 +875,11 @@ export function NavigationProvider({
         return
       }
 
-      // Parse route to NavigationState
-      let newNavState = parseRouteToNavigationState(route)
-
-      // Settings subpage persistence
-      if (newNavState && isSettingsNavigation(newNavState)) {
-        const isBareSettingsRoute = route === 'settings'
-        if (isBareSettingsRoute) {
-          const savedSubpage = storage.get<string>(storage.KEYS.lastSettingsSubpage, 'app')
-          if (isValidSettingsSubpage(savedSubpage) && savedSubpage !== 'app') {
-            newNavState = { ...newNavState, subpage: savedSubpage as SettingsSubpage }
-          }
-        } else {
-          storage.set(storage.KEYS.lastSettingsSubpage, newNavState.subpage)
-        }
-      }
+      // Parse route to NavigationState. Bare `settings` produces `subpage: null` —
+      // navigator-only view in compact mode, App-page fallback on desktop. We
+      // intentionally do NOT auto-redirect to the last-visited subpage; doing so
+      // would defeat the compact-mode drill-in UX.
+      const newNavState = parseRouteToNavigationState(route)
 
       // Suppress auto-select effect
       if (options?.skipAutoSelect) {
@@ -1121,8 +1112,8 @@ export function NavigationProvider({
       if (route) {
         const navState = parseRouteToNavigationState(route)
         if (!navState && !route.startsWith('action/')) {
-          toast.error('Invalid link', {
-            description: 'The content may have been moved or deleted.',
+          toast.error(t('toast.invalidLink'), {
+            description: t('toast.invalidLinkDesc'),
           })
           return
         }

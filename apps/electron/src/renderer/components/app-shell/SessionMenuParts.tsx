@@ -1,67 +1,57 @@
 import * as React from 'react'
+import { useTranslation } from "react-i18next"
 import { Check, Globe, Copy, RefreshCw, Link2Off } from 'lucide-react'
-import { toast } from 'sonner'
 import type { MenuComponents } from '@/components/ui/menu-context'
 import { getStatusIconStyle, type SessionStatusId, type SessionStatus } from '@/config/session-status-config'
-import type { LabelConfig } from '@craft-agent/shared/labels'
+import { sortLabelsForDisplay, type LabelConfig } from '@craft-agent/shared/labels'
 import { LabelIcon } from '@/components/ui/label-icon'
 
 export interface ShareMenuItemsProps {
-  sessionId: string
-  sharedUrl: string
+  /** Open the published share URL in the system browser. */
+  onOpenInBrowser: () => void
+  /** Copy the published share URL to the clipboard. */
+  onCopyLink: () => void | Promise<void>
+  /** Re-publish the share (bumps the snapshot). */
+  onUpdateShare: () => void | Promise<void>
+  /** Revoke the share. */
+  onRevokeShare: () => void | Promise<void>
   menu: Pick<MenuComponents, 'MenuItem' | 'Separator'>
 }
 
-export function ShareMenuItems({ sessionId, sharedUrl, menu }: ShareMenuItemsProps) {
+/**
+ * Render-only — side effects come from `useSessionMenuActions`. Both the
+ * desktop dropdown and the compact drawer wire the same hook callbacks
+ * through this component (compact uses its own row primitives, but the
+ * action set is identical).
+ */
+export function ShareMenuItems({
+  onOpenInBrowser,
+  onCopyLink,
+  onUpdateShare,
+  onRevokeShare,
+  menu,
+}: ShareMenuItemsProps) {
+  const { t } = useTranslation()
   const { MenuItem, Separator } = menu
-
-  const handleOpenInBrowser = () => {
-    window.electronAPI.openUrl(sharedUrl)
-  }
-
-  const handleCopyLink = async () => {
-    await navigator.clipboard.writeText(sharedUrl)
-    toast.success('Link copied to clipboard')
-  }
-
-  const handleUpdateShare = async () => {
-    const result = await window.electronAPI.sessionCommand(sessionId, { type: 'updateShare' })
-    if (result && 'success' in result && result.success) {
-      toast.success('Share updated')
-    } else {
-      const errorMsg = result && 'error' in result ? result.error : undefined
-      toast.error('Failed to update share', { description: errorMsg })
-    }
-  }
-
-  const handleRevokeShare = async () => {
-    const result = await window.electronAPI.sessionCommand(sessionId, { type: 'revokeShare' })
-    if (result && 'success' in result && result.success) {
-      toast.success('Sharing stopped')
-    } else {
-      const errorMsg = result && 'error' in result ? result.error : undefined
-      toast.error('Failed to stop sharing', { description: errorMsg })
-    }
-  }
 
   return (
     <>
-      <MenuItem onClick={handleOpenInBrowser}>
+      <MenuItem onClick={onOpenInBrowser}>
         <Globe className="h-3.5 w-3.5" />
-        <span className="flex-1">Open in Browser</span>
+        <span className="flex-1">{t("sessionMenu.openInBrowser")}</span>
       </MenuItem>
-      <MenuItem onClick={handleCopyLink}>
+      <MenuItem onClick={onCopyLink}>
         <Copy className="h-3.5 w-3.5" />
-        <span className="flex-1">Copy Link</span>
+        <span className="flex-1">{t("sessionMenu.copyLink")}</span>
       </MenuItem>
-      <MenuItem onClick={handleUpdateShare}>
+      <MenuItem onClick={onUpdateShare}>
         <RefreshCw className="h-3.5 w-3.5" />
-        <span className="flex-1">Update Share</span>
+        <span className="flex-1">{t("sessionMenu.updateShare")}</span>
       </MenuItem>
       <Separator />
-      <MenuItem onClick={handleRevokeShare} variant="destructive">
+      <MenuItem onClick={onRevokeShare} variant="destructive">
         <Link2Off className="h-3.5 w-3.5" />
-        <span className="flex-1">Stop Sharing</span>
+        <span className="flex-1">{t("sessionMenu.stopSharing")}</span>
       </MenuItem>
     </>
   )
@@ -142,10 +132,11 @@ export function LabelMenuItems({
   menu,
 }: LabelMenuItemsProps) {
   const { MenuItem, Separator, Sub, SubTrigger, SubContent } = menu
+  const displayLabels = React.useMemo(() => sortLabelsForDisplay(labels), [labels])
 
-  return (
+  const renderItems = (nodes: LabelConfig[]): React.ReactNode => (
     <>
-      {labels.map(label => {
+      {nodes.map(label => {
         const hasChildren = label.children && label.children.length > 0
         const isApplied = appliedLabelIds.has(label.id)
 
@@ -177,12 +168,7 @@ export function LabelMenuItems({
                   </span>
                 </MenuItem>
                 <Separator />
-                <LabelMenuItems
-                  labels={label.children!}
-                  appliedLabelIds={appliedLabelIds}
-                  onToggle={onToggle}
-                  menu={menu}
-                />
+                {renderItems(label.children!)}
               </SubContent>
             </Sub>
           )
@@ -206,4 +192,6 @@ export function LabelMenuItems({
       })}
     </>
   )
+
+  return renderItems(displayLabels)
 }

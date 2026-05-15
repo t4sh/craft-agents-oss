@@ -14,6 +14,7 @@
  */
 
 import { useCallback, useMemo } from 'react'
+import { useTranslation } from 'react-i18next'
 import { useSetAtom } from 'jotai'
 import { cn } from '@/lib/utils'
 import { X, ChevronLeft } from 'lucide-react'
@@ -53,6 +54,7 @@ export function PanelSlot({
   sash,
   isCompact,
 }: PanelSlotProps) {
+  const { t } = useTranslation()
   const closePanel = useSetAtom(closePanelAtom)
   const setFocusedPanel = useSetAtom(focusedPanelIdAtom)
   const parentContext = useAppShellContext()
@@ -68,7 +70,7 @@ export function PanelSlot({
       <PanelHeaderCenterButton
         icon={<X className="h-4 w-4" />}
         onClick={handleClose}
-        tooltip="Close"
+        tooltip={t("common.close")}
       />
     )
   }, [handleClose])
@@ -81,7 +83,7 @@ export function PanelSlot({
       <PanelHeaderCenterButton
         icon={<ChevronLeft className="h-4 w-4" />}
         onClick={handleClose}
-        tooltip="Back to list"
+        tooltip={t("common.backToList")}
       />
     )
   }, [isCompact, handleClose])
@@ -124,11 +126,12 @@ export function PanelSlot({
               } as React.CSSProperties
             : {}
           ),
-          // Corner radii: edge corners (touching window boundary) vs interior corners
+          // Corner radii: edge corners (touching window boundary) vs interior corners.
+          // Compact mode panels run flush to the viewport floor — no rounded bottom.
           borderTopLeftRadius: RADIUS_INNER,
-          borderBottomLeftRadius: isAtLeftEdge ? RADIUS_EDGE : RADIUS_INNER,
+          borderBottomLeftRadius: isCompact ? 0 : (isAtLeftEdge ? RADIUS_EDGE : RADIUS_INNER),
           borderTopRightRadius: RADIUS_INNER,
-          borderBottomRightRadius: isAtRightEdge ? RADIUS_EDGE : RADIUS_INNER,
+          borderBottomRightRadius: isCompact ? 0 : (isAtRightEdge ? RADIUS_EDGE : RADIUS_INNER),
           ...(isOnly
             ? { flexGrow: 1, minWidth: 0 }
             : { flexGrow: proportion, flexShrink: 1, flexBasis: 0, minWidth: PANEL_MIN_WIDTH }

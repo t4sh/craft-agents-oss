@@ -49,6 +49,7 @@ export const CHANNEL_MAP = {
   getWorkspaces: invoke(RPC_CHANNELS.workspaces.GET),
   createWorkspace: invoke(RPC_CHANNELS.workspaces.CREATE),
   checkWorkspaceSlug: invoke(RPC_CHANNELS.workspaces.CHECK_SLUG),
+  updateWorkspaceRemoteServer: invoke(RPC_CHANNELS.workspaces.UPDATE_REMOTE),
   testRemoteConnection: invoke(RPC_CHANNELS.remote.TEST_CONNECTION),
 
   // Server-level workspace operations (REMOTE_ELIGIBLE)
@@ -70,9 +71,11 @@ export const CHANNEL_MAP = {
   // File operations
   readFile: invoke(RPC_CHANNELS.file.READ),
   readFileDataUrl: invoke(RPC_CHANNELS.file.READ_DATA_URL),
+  readFilePreviewDataUrl: invoke(RPC_CHANNELS.file.READ_PREVIEW_DATA_URL),
   readFileBinary: invoke(RPC_CHANNELS.file.READ_BINARY),
   openFileDialog: invoke(RPC_CHANNELS.file.OPEN_DIALOG),
   readFileAttachment: invoke(RPC_CHANNELS.file.READ_ATTACHMENT),
+  readUserAttachment: invoke(RPC_CHANNELS.file.READ_USER_ATTACHMENT),
   storeAttachment: invoke(RPC_CHANNELS.file.STORE_ATTACHMENT),
   generateThumbnail: invoke(RPC_CHANNELS.file.GENERATE_THUMBNAIL),
 
@@ -292,11 +295,21 @@ export const CHANNEL_MAP = {
   getRichToolDescriptions: invoke(RPC_CHANNELS.appearance.GET_RICH_TOOL_DESCRIPTIONS),
   setRichToolDescriptions: invoke(RPC_CHANNELS.appearance.SET_RICH_TOOL_DESCRIPTIONS),
 
+  // Tools settings
+  getBrowserToolEnabled: invoke(RPC_CHANNELS.tools.GET_BROWSER_TOOL_ENABLED),
+  setBrowserToolEnabled: invoke(RPC_CHANNELS.tools.SET_BROWSER_TOOL_ENABLED),
+
   // Prompt caching & context
   getExtendedPromptCache: invoke(RPC_CHANNELS.caching.GET_EXTENDED_PROMPT_CACHE),
   setExtendedPromptCache: invoke(RPC_CHANNELS.caching.SET_EXTENDED_PROMPT_CACHE),
   getEnable1MContext: invoke(RPC_CHANNELS.caching.GET_ENABLE_1M_CONTEXT),
   setEnable1MContext: invoke(RPC_CHANNELS.caching.SET_ENABLE_1M_CONTEXT),
+
+  // RTK token optimization
+  getRtkEnabled: invoke(RPC_CHANNELS.rtk.GET_ENABLED),
+  setRtkEnabled: invoke(RPC_CHANNELS.rtk.SET_ENABLED),
+  getRtkStatus: invoke(RPC_CHANNELS.rtk.GET_STATUS),
+  getRtkGain: invoke(RPC_CHANNELS.rtk.GET_GAIN),
 
   // Badge
   refreshBadge: invoke(RPC_CHANNELS.badge.REFRESH),
@@ -358,6 +371,7 @@ export const CHANNEL_MAP = {
   setWorkspaceDefaultLlmConnection: invoke(RPC_CHANNELS.llmConnections.SET_WORKSPACE_DEFAULT),
 
   // Automations
+  getAutomations: invoke(RPC_CHANNELS.automations.GET),
   testAutomation: invoke(RPC_CHANNELS.automations.TEST),
   setAutomationEnabled: invoke(RPC_CHANNELS.automations.SET_ENABLED),
   duplicateAutomation: invoke(RPC_CHANNELS.automations.DUPLICATE),
@@ -366,4 +380,41 @@ export const CHANNEL_MAP = {
   getAutomationLastExecuted: invoke(RPC_CHANNELS.automations.GET_LAST_EXECUTED),
   replayAutomation: invoke(RPC_CHANNELS.automations.REPLAY),
   onAutomationsChanged: listener(RPC_CHANNELS.automations.CHANGED),
+
+  // Resources (cross-workspace export/import)
+  exportResources: invoke(RPC_CHANNELS.resources.EXPORT),
+  importResources: invoke(RPC_CHANNELS.resources.IMPORT),
+
+  // Messaging gateway
+  getMessagingConfig: invoke(RPC_CHANNELS.messaging.GET_CONFIG),
+  updateMessagingConfig: invoke(RPC_CHANNELS.messaging.UPDATE_CONFIG),
+  testTelegramToken: invoke(RPC_CHANNELS.messaging.TEST_TELEGRAM),
+  saveTelegramToken: invoke(RPC_CHANNELS.messaging.SAVE_TELEGRAM),
+  testLarkCredentials: invoke(RPC_CHANNELS.messaging.TEST_LARK),
+  saveLarkCredentials: invoke(RPC_CHANNELS.messaging.SAVE_LARK),
+  disconnectMessagingPlatform: invoke(RPC_CHANNELS.messaging.DISCONNECT),
+  forgetMessagingPlatform: invoke(RPC_CHANNELS.messaging.FORGET),
+  getMessagingBindings: invoke(RPC_CHANNELS.messaging.GET_BINDINGS),
+  generateMessagingPairingCode: invoke(RPC_CHANNELS.messaging.GENERATE_CODE),
+  generateMessagingSupergroupCode: invoke(RPC_CHANNELS.messaging.GENERATE_SUPERGROUP_CODE),
+  getMessagingSupergroup: invoke(RPC_CHANNELS.messaging.GET_SUPERGROUP),
+  unbindMessagingSupergroup: invoke(RPC_CHANNELS.messaging.UNBIND_SUPERGROUP),
+  unbindMessagingSession: invoke(RPC_CHANNELS.messaging.UNBIND),
+  unbindMessagingBinding: invoke(RPC_CHANNELS.messaging.UNBIND_BINDING),
+  onMessagingBindingChanged: listener(RPC_CHANNELS.messaging.BINDING_CHANGED),
+  onMessagingPlatformStatus: listener(RPC_CHANNELS.messaging.PLATFORM_STATUS),
+  startWhatsAppConnect: invoke(RPC_CHANNELS.messaging.WA_START_CONNECT),
+  submitWhatsAppPhone: invoke(RPC_CHANNELS.messaging.WA_SUBMIT_PHONE),
+  onWhatsAppEvent: listener(RPC_CHANNELS.messaging.WA_UI_EVENT),
+
+  // Messaging access control (Phase 3)
+  getMessagingPlatformOwners: invoke(RPC_CHANNELS.messaging.GET_PLATFORM_OWNERS),
+  setMessagingPlatformOwners: invoke(RPC_CHANNELS.messaging.SET_PLATFORM_OWNERS),
+  getMessagingPlatformAccessMode: invoke(RPC_CHANNELS.messaging.GET_PLATFORM_ACCESS_MODE),
+  setMessagingPlatformAccessMode: invoke(RPC_CHANNELS.messaging.SET_PLATFORM_ACCESS_MODE),
+  getMessagingPendingSenders: invoke(RPC_CHANNELS.messaging.GET_PENDING_SENDERS),
+  dismissMessagingPendingSender: invoke(RPC_CHANNELS.messaging.DISMISS_PENDING_SENDER),
+  allowMessagingPendingSender: invoke(RPC_CHANNELS.messaging.ALLOW_PENDING_SENDER),
+  setMessagingBindingAccess: invoke(RPC_CHANNELS.messaging.SET_BINDING_ACCESS),
+  onMessagingPendingChanged: listener(RPC_CHANNELS.messaging.PENDING_CHANGED),
 } satisfies ChannelMap

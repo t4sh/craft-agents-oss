@@ -1,4 +1,5 @@
-import { formatPreferencesForPrompt } from '../config/preferences.ts';
+import { formatPreferencesForPrompt, getCoAuthorPreference } from '../config/preferences.ts';
+import { getBrowserToolEnabled } from '../config/storage.ts';
 import { debug } from '../utils/debug.ts';
 import { existsSync, readFileSync, readdirSync } from 'fs';
 import { join, relative, basename } from 'path';
@@ -70,12 +71,43 @@ export function findProjectContextFile(directory: string): string | null {
   return null;
 }
 
+// ── Context file cache ──────────────────────────────────────────────────
+// The glob walk is expensive (~7s in large monorepos). The result (a list of
+// file paths like "CLAUDE.md", "apps/electron/CLAUDE.md") rarely changes during
+// a session, so we cache it per working directory with a 5-minute safety TTL.
+// Explicit invalidation happens on working directory changes.
+
+const contextFileCache = new Map<string, { files: string[]; ts: number }>();
+const CONTEXT_FILE_CACHE_TTL = 5 * 60_000; // 5 minutes
+
+/** Invalidate the cached context file list for a directory (or all directories). */
+export function invalidateContextFileCache(directory?: string): void {
+  if (directory) {
+    contextFileCache.delete(directory);
+    debug(`[contextFileCache] Invalidated cache for ${directory}`);
+  } else {
+    contextFileCache.clear();
+    debug(`[contextFileCache] Cleared all cached entries`);
+  }
+}
+
 /**
  * Find all project context files (AGENTS.md or CLAUDE.md) recursively in a directory.
  * Supports monorepo setups where each package may have its own context file.
  * Returns relative paths sorted by depth (root first), capped at MAX_CONTEXT_FILES.
+ *
+ * Results are cached per directory. Call invalidateContextFileCache() on working
+ * directory changes. A 5-minute TTL acts as a safety net for cache staleness.
  */
 export function findAllProjectContextFiles(directory: string): string[] {
+  // Check cache first
+  const now = Date.now();
+  const cached = contextFileCache.get(directory);
+  if (cached && now - cached.ts < CONTEXT_FILE_CACHE_TTL) {
+    debug(`[findAllProjectContextFiles] Cache hit for ${directory} (${cached.files.length} files)`);
+    return cached.files;
+  }
+
   try {
     // Build glob ignore patterns from excluded directories
     const ignorePatterns = EXCLUDED_DIRECTORIES.map((dir) => `**/${dir}/**`);
@@ -90,6 +122,7 @@ export function findAllProjectContextFiles(directory: string): string[] {
     });
 
     if (matches.length === 0) {
+      contextFileCache.set(directory, { files: [], ts: now });
       return [];
     }
 
@@ -106,6 +139,7 @@ export function findAllProjectContextFiles(directory: string): string[] {
     const capped = sorted.slice(0, MAX_CONTEXT_FILES);
 
     debug(`[findAllProjectContextFiles] Found ${matches.length} files, returning ${capped.length}`);
+    contextFileCache.set(directory, { files: capped, ts: now });
     return capped;
   } catch (error) {
     debug(`[findAllProjectContextFiles] Error searching directory:`, error);
@@ -315,7 +349,8 @@ export function getSystemPrompt(
   workspaceRootPath?: string,
   workingDirectory?: string,
   preset?: SystemPromptPreset | string,
-  backendName?: string
+  backendName?: string,
+  includeCoAuthoredBy?: boolean
 ): string {
   // Use mini agent prompt for quick edits (pass workspace root for config paths)
   if (preset === 'mini') {
@@ -330,10 +365,14 @@ export function getSystemPrompt(
   // Get project context files for monorepo support (lives in system prompt for persistence across compaction)
   const projectContextFiles = getProjectContextFilesPrompt(workingDirectory);
 
+  // Fall back to the user's current preference when callers don't pin/pass a value,
+  // so forgetting the argument can't silently re-enable the co-author trailer (see #576).
+  const resolvedIncludeCoAuthoredBy = includeCoAuthoredBy ?? getCoAuthorPreference();
+
   // Note: Date/time context is now added to user messages instead of system prompt
   // to enable prompt caching. The system prompt stays static and cacheable.
   // Safe Mode context is also in user messages for the same reason.
-  const basePrompt = getCraftAssistantPrompt(workspaceRootPath, backendName);
+  const basePrompt = getCraftAssistantPrompt(workspaceRootPath, backendName, resolvedIncludeCoAuthoredBy);
   const fullPrompt = `${basePrompt}${preferences}${debugContext}${projectContextFiles}`;
 
   debug('[getSystemPrompt] full prompt length:', fullPrompt.length);
@@ -409,8 +448,9 @@ function getCraftAgentEnvironmentMarker(): string {
  *
  * @param workspaceRootPath - Root path of the workspace
  * @param backendName - Backend name for "powered by X" text (default: 'Claude Code')
+ * @param includeCoAuthoredBy - Whether to include the Co-Authored-By git trailer instruction (default: true)
  */
-function getCraftAssistantPrompt(workspaceRootPath?: string, backendName: string = 'Claude Code'): string {
+function getCraftAssistantPrompt(workspaceRootPath?: string, backendName: string = 'Claude Code', includeCoAuthoredBy: boolean = true): string {
   // Default to ${APP_ROOT}/workspaces/{id} if no path provided
   const workspacePath = workspaceRootPath || `${APP_ROOT}/workspaces/{id}`;
 
@@ -422,6 +462,60 @@ function getCraftAssistantPrompt(workspaceRootPath?: string, backendName: string
 
   // Environment marker for SDK JSONL detection
   const environmentMarker = getCraftAgentEnvironmentMarker();
+
+  const browserToolsSection = getBrowserToolEnabled() ? `
+## Browser Tools
+
+You can control built-in browser windows through \`browser_tool\`, a unified CLI-like interface.
+Multiple commands can be batched with semicolons (e.g., \`fill @e1 x; fill @e2 y; click @e3\`). Batches stop after navigation commands.
+
+**IMPORTANT:** All browser tool calls are **blocked** until you read \`${DOC_REFS.browserTools}\`. Always read this guide before your first browser tool call in a session.
+
+Use the browser as an **alternative/fallback** path when source setup is fragile, API coverage is limited, or the task is one-off and UI-driven. Keep sources as the default for repeatable integrations and automation.
+
+**Start here:** Run \`browser_tool --help\` to see all available commands and usage examples. Use it whenever you're unsure what's available or how to call something.
+
+**Recommended workflow:**
+1. \`browser_tool open\` — ensure browser window exists (opens in background)
+2. \`browser_tool navigate <url>\` — load a page
+3. \`browser_tool snapshot\` — get element refs (@e1, @e2, ...)
+4. \`browser_tool click @e1\` / \`browser_tool fill @e5 text\` / \`browser_tool select @e3 value\`
+
+**Key commands beyond basics:**
+- \`browser_tool click-at 350 200\` — click at pixel coordinates (for canvas-based UIs like Google Sheets)
+- \`browser_tool drag 100 200 300 400\` — drag from (100,200) to (300,400)
+- \`browser_tool find login button\` — search elements by keyword across role/name/value/description
+- \`browser_tool type Hello World\` — type into currently focused element (no ref needed)
+- \`browser_tool set-clipboard Name\\tAge\\nAlice\\t30\` — write text to page clipboard
+- \`browser_tool get-clipboard\` — read clipboard text content
+- \`browser_tool paste Name\\tAge\\nAlice\\t30\` — set clipboard and trigger Ctrl/Cmd+V
+- \`browser_tool console [limit] [level]\` — inspect runtime errors/warnings
+- \`browser_tool network [limit] [status]\` — debug failed API calls
+- \`browser_tool wait <kind> [value] [timeout]\` — wait for selector/text/url/network-idle
+- \`browser_tool key <key> [modifiers]\` — send keyboard input (Enter, Escape, Cmd+K)
+- \`browser_tool screenshot --annotated\` — capture screenshot with @eN overlays for interactive elements
+- \`browser_tool screenshot-region --ref @e12\` — capture a specific element
+- \`browser_tool window-resize 1280 720\` — set deterministic viewport
+- \`browser_tool downloads [list|wait]\` — monitor file downloads
+- \`browser_tool scroll down 800\` — scroll the page
+- \`browser_tool evaluate <expression>\` — execute JavaScript
+- \`browser_tool windows\` — list browser windows and ownership
+- \`browser_tool focus [windowId]\` — focus existing browser window (no new window)
+- \`browser_tool close\` — close and destroy the browser window when done
+- \`browser_tool hide\` — hide the window (preserves state, \`open\` re-shows instantly)
+- \`browser_tool release\` — dismiss agent overlay only (user keeps browsing)
+
+**Tips:**
+- Prefer \`snapshot\` over \`screenshot\` for element interaction
+- Re-run \`snapshot\` after navigation (refs change with DOM)
+- Run \`browser_tool --help\` if you need syntax for any command
+- Full reference: \`${DOC_REFS.browserTools}\`
+
+**Lifecycle — when you're done:**
+- \`close\` — task fully complete, browser no longer needed (destroys window)
+- \`release\` — you're done but user may want to keep browsing the page
+- \`hide\` — temporarily done, may need browser again later in conversation
+` : '';
 
   return `${environmentMarker}
 
@@ -523,15 +617,14 @@ When you learn information about the user (their name, timezone, location, langu
 
 !!IMPORTANT!!. You must refer to yourself as Craft Agent when asked. You can acknowledge that you are powered by ${backendName}.
 
-## Git Conventions
+${includeCoAuthoredBy ? `## Git Conventions
 
 When creating git commits, include Craft Agent as a co-author:
 
 \`\`\`
 Co-Authored-By: Craft Agent <agents-noreply@craft.do>
 \`\`\`
-
-## Permission Modes
+` : ''}## Permission Modes
 
 | Mode | Description |
 |------|-------------|
@@ -752,58 +845,36 @@ Use the \`call_llm\` tool to invoke a secondary LLM for focused subtasks. It run
 - Task = full agent with tools, multi-turn, expensive, sequential. Best for *exploring* and finding things.
 
 **Quick reference:** Read \`${DOC_REFS.llmTool}\` for full parameter docs, output formats, and examples.
+${browserToolsSection}
+## Session Self-Management
 
-## Browser Tools
+You can manage your own session's metadata and query other sessions in the workspace.
 
-You can control built-in browser windows through \`browser_tool\`, a unified CLI-like interface.
-Multiple commands can be batched with semicolons (e.g., \`fill @e1 x; fill @e2 y; click @e3\`). Batches stop after navigation commands.
+**Introspecting your session:**
+\`get_session_info\` — returns your current labels, status, permission mode, and other metadata. Pass a \`sessionId\` to query a different session.
 
-**IMPORTANT:** All browser tool calls are **blocked** until you read \`${DOC_REFS.browserTools}\`. Always read this guide before your first browser tool call in a session.
+**Setting labels:**
+\`set_session_labels\` — replaces all labels on the current session. Use it to tag your work or to trigger label-based automations (\`LabelAdd\` events).
 
-Use the browser as an **alternative/fallback** path when source setup is fragile, API coverage is limited, or the task is one-off and UI-driven. Keep sources as the default for repeatable integrations and automation.
+Labels come in two shapes:
+- **Boolean** (presence-only): a plain ID, e.g. \`"bug"\`, \`"urgent"\`.
+- **Valued** (\`id::value\` form): only for labels configured with a \`valueType\`. The value must match the declared type — \`number\` accepts decimals only (no scientific notation), \`date\` requires \`YYYY-MM-DD\` (or \`YYYY-MM-DDTHH:mm\`), \`string\` accepts anything. Examples: \`"priority::3"\`, \`"due::2026-01-30"\`, \`"parent-task::TASK-123"\`.
 
-**Start here:** Run \`browser_tool --help\` to see all available commands and usage examples. Use it whenever you're unsure what's available or how to call something.
+If you get a "Labels rejected" error, the reason is per-entry — common causes are an unknown base ID, a value supplied to a boolean label, or a value that doesn't match the declared \`valueType\`.
 
-**Recommended workflow:**
-1. \`browser_tool open\` — ensure browser window exists (opens in background)
-2. \`browser_tool navigate <url>\` — load a page
-3. \`browser_tool snapshot\` — get element refs (@e1, @e2, ...)
-4. \`browser_tool click @e1\` / \`browser_tool fill @e5 text\` / \`browser_tool select @e3 value\`
+**Setting status:**
+\`set_session_status\` — changes the session status (e.g., "done", "in_progress"). Use it to signal completion or trigger status-based automations (\`SessionStatusChange\` events).
 
-**Key commands beyond basics:**
-- \`browser_tool click-at 350 200\` — click at pixel coordinates (for canvas-based UIs like Google Sheets)
-- \`browser_tool drag 100 200 300 400\` — drag from (100,200) to (300,400)
-- \`browser_tool find login button\` — search elements by keyword across role/name/value/description
-- \`browser_tool type Hello World\` — type into currently focused element (no ref needed)
-- \`browser_tool set-clipboard Name\\tAge\\nAlice\\t30\` — write text to page clipboard
-- \`browser_tool get-clipboard\` — read clipboard text content
-- \`browser_tool paste Name\\tAge\\nAlice\\t30\` — set clipboard and trigger Ctrl/Cmd+V
-- \`browser_tool console [limit] [level]\` — inspect runtime errors/warnings
-- \`browser_tool network [limit] [status]\` — debug failed API calls
-- \`browser_tool wait <kind> [value] [timeout]\` — wait for selector/text/url/network-idle
-- \`browser_tool key <key> [modifiers]\` — send keyboard input (Enter, Escape, Cmd+K)
-- \`browser_tool screenshot --annotated\` — capture screenshot with @eN overlays for interactive elements
-- \`browser_tool screenshot-region --ref @e12\` — capture a specific element
-- \`browser_tool window-resize 1280 720\` — set deterministic viewport
-- \`browser_tool downloads [list|wait]\` — monitor file downloads
-- \`browser_tool scroll down 800\` — scroll the page
-- \`browser_tool evaluate <expression>\` — execute JavaScript
-- \`browser_tool windows\` — list browser windows and ownership
-- \`browser_tool focus [windowId]\` — focus existing browser window (no new window)
-- \`browser_tool close\` — close and destroy the browser window when done
-- \`browser_tool hide\` — hide the window (preserves state, \`open\` re-shows instantly)
-- \`browser_tool release\` — dismiss agent overlay only (user keeps browsing)
+**Querying sessions:**
+\`list_sessions\` — returns \`{ total, returned, sessions }\` with pagination. Always use filters (status, label, search) to narrow results. Default limit is 20 sessions.
+- Use \`get_session_info\` for full details on a specific session (list-then-detail pattern).
+- Do NOT call \`list_sessions\` with a high limit just to scan all sessions — filter first.
 
-**Tips:**
-- Prefer \`snapshot\` over \`screenshot\` for element interaction
-- Re-run \`snapshot\` after navigation (refs change with DOM)
-- Run \`browser_tool --help\` if you need syntax for any command
-- Full reference: \`${DOC_REFS.browserTools}\`
-
-**Lifecycle — when you're done:**
-- \`close\` — task fully complete, browser no longer needed (destroys window)
-- \`release\` — you're done but user may want to keep browsing the page
-- \`hide\` — temporarily done, may need browser again later in conversation
+**Automation integration:**
+Setting labels or status triggers the corresponding automation events (\`LabelAdd\`/\`LabelRemove\`, \`SessionStatusChange\`). This enables self-closing workflows:
+1. Scheduled automation creates a session
+2. Agent completes work
+3. Agent calls \`set_session_status\` with "done" → triggers downstream webhook/notification
 
 ## Diagrams and Visualization
 

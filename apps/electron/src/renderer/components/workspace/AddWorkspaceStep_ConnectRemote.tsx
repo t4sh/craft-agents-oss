@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react"
+import { useTranslation } from "react-i18next"
 import { ArrowLeft, CheckCircle, XCircle, Plus } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { slugify } from "@/lib/slugify"
@@ -12,6 +13,14 @@ interface AddWorkspaceStep_ConnectRemoteProps {
   onBack: () => void
   onCreate: (folderPath: string, name: string, remoteServer: { url: string; token: string; remoteWorkspaceId: string }) => Promise<void>
   isCreating: boolean
+  /** Pre-fill the server URL (for reconnect flow) */
+  initialUrl?: string
+  /** Pre-fill the token (for reconnect flow) */
+  initialToken?: string
+  /** When set, updating an existing workspace's remote config instead of creating */
+  reconnectWorkspace?: { id: string; name: string; remoteWorkspaceId: string }
+  /** Called when reconnect updates the remote server config */
+  onUpdate?: (workspaceId: string, remoteServer: { url: string; token: string; remoteWorkspaceId: string }) => Promise<void>
 }
 
 /**
@@ -51,9 +60,15 @@ export function AddWorkspaceStep_ConnectRemote({
   onBack,
   onCreate,
   isCreating,
+  initialUrl,
+  initialToken,
+  reconnectWorkspace,
+  onUpdate,
 }: AddWorkspaceStep_ConnectRemoteProps) {
-  const [serverUrl, setServerUrl] = useState('')
-  const [token, setToken] = useState('')
+  const { t } = useTranslation()
+  const isReconnectMode = !!reconnectWorkspace
+  const [serverUrl, setServerUrl] = useState(initialUrl ?? '')
+  const [token, setToken] = useState(initialToken ?? '')
   const [homeDir, setHomeDir] = useState('')
   const [testState, setTestState] = useState<'idle' | 'testing' | 'ok' | 'error'>('idle')
   const [testError, setTestError] = useState<string | null>(null)
@@ -113,8 +128,25 @@ export function AddWorkspaceStep_ConnectRemote({
   }, [serverUrl, token])
 
   const handleConnect = useCallback(async () => {
-    if (!serverUrl || !token || !homeDir) return
+    if (!serverUrl || !token) return
 
+    // Reconnect mode — update existing workspace config
+    if (isReconnectMode && onUpdate) {
+      try {
+        await onUpdate(reconnectWorkspace!.id, {
+          url: serverUrl,
+          token,
+          remoteWorkspaceId: reconnectWorkspace!.remoteWorkspaceId,
+        })
+        return
+      } catch (err) {
+        setTestState('error')
+        setTestError(err instanceof Error ? err.message : 'Failed to reconnect workspace')
+        return
+      }
+    }
+
+    if (!homeDir) return
     const defaultBasePath = `${homeDir}/.craft-agent/workspaces`
 
     if (isCreateNew || isFreshServer) {
@@ -141,15 +173,16 @@ export function AddWorkspaceStep_ConnectRemote({
       const finalPath = path || `${defaultBasePath}/${slug}`
       await onCreate(finalPath, selectedWorkspace.name, { url: serverUrl, token, remoteWorkspaceId: selectedWorkspace.id })
     }
-  }, [serverUrl, token, homeDir, isCreateNew, isFreshServer, newWorkspaceName, selectedWorkspace, onCreate])
+  }, [serverUrl, token, homeDir, isCreateNew, isFreshServer, newWorkspaceName, selectedWorkspace, onCreate, isReconnectMode, onUpdate, reconnectWorkspace])
 
   const canConnect = testState === 'ok' && !isCreating && (
+    isReconnectMode ? true :
     (isFreshServer || isCreateNew) ? !!newWorkspaceName.trim() : !!selectedWorkspace
   )
 
-  const showCreateMode = isCreateNew || isFreshServer
-  const buttonLabel = showCreateMode ? 'Create and Connect' : 'Connect'
-  const buttonLoadingLabel = showCreateMode ? 'Creating...' : 'Connecting...'
+  const showCreateMode = !isReconnectMode && (isCreateNew || isFreshServer)
+  const buttonLabel = isReconnectMode ? 'Reconnect' : showCreateMode ? 'Create and Connect' : 'Connect'
+  const buttonLoadingLabel = isReconnectMode ? 'Reconnecting...' : showCreateMode ? 'Creating...' : 'Connecting...'
 
   return (
     <AddWorkspaceContainer>
@@ -168,8 +201,10 @@ export function AddWorkspaceStep_ConnectRemote({
       </button>
 
       <AddWorkspaceStepHeader
-        title="Connect to remote server"
-        description="Connect to a remote Craft Agent Server for this workspace."
+        title={isReconnectMode ? t("workspace.reconnect", { name: reconnectWorkspace!.name }) : "Connect to remote server"}
+        description={isReconnectMode
+          ? "Update the server URL or token to restore the connection."
+          : "Connect to a remote Craft Agent Server for this workspace."}
       />
 
       <div className="mt-6 w-full space-y-5">
@@ -200,7 +235,7 @@ export function AddWorkspaceStep_ConnectRemote({
               type="password"
               value={token}
               onChange={(e) => setToken(e.target.value)}
-              placeholder="Server authentication token"
+              placeholder={t("workspace.serverAuthToken")}
               disabled={isCreating}
               className="border-0 bg-transparent shadow-none"
             />
@@ -239,15 +274,15 @@ export function AddWorkspaceStep_ConnectRemote({
         {testState === 'ok' && !serverVersion && (
           <div className="flex items-start gap-2 px-3 py-2 rounded-lg bg-yellow-500/10 border border-yellow-500/20 text-xs text-yellow-700 dark:text-yellow-400">
             <XCircle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
-            <span>This server is running an older version. Some features like remote directory browsing may not work correctly. Update the server for full functionality.</span>
+            <span>{t("workspace.olderServerWarning")}</span>
           </div>
         )}
 
         {/* Portal container for Select — must be inside the Dialog to receive pointer events */}
         <div ref={selectPortalRef} />
 
-        {/* Workspace selector — pick existing or create new */}
-        {testState === 'ok' && remoteWorkspaces.length > 0 && !isCreateNew && (
+        {/* Workspace selector — pick existing or create new (hidden in reconnect mode) */}
+        {!isReconnectMode && testState === 'ok' && remoteWorkspaces.length > 0 && !isCreateNew && (
           <div className="space-y-2">
             <label className="block text-sm font-medium text-foreground">
               Workspace
@@ -259,7 +294,7 @@ export function AddWorkspaceStep_ConnectRemote({
                 disabled={isCreating}
               >
                 <SelectTrigger className="border-0 bg-transparent shadow-none">
-                  <SelectValue placeholder="Select a workspace..." />
+                  <SelectValue placeholder={t("workspace.selectWorkspacePlaceholder")} />
                 </SelectTrigger>
                 <SelectContent container={selectPortalRef.current}>
                   {remoteWorkspaces.map(ws => (
@@ -282,8 +317,8 @@ export function AddWorkspaceStep_ConnectRemote({
           </div>
         )}
 
-        {/* New workspace name — shown for fresh servers or "Create new" selection */}
-        {testState === 'ok' && showCreateMode && (
+        {/* New workspace name — shown for fresh servers or "Create new" selection (hidden in reconnect mode) */}
+        {!isReconnectMode && testState === 'ok' && showCreateMode && (
           <div className="space-y-2">
             <label className="block text-sm font-medium text-foreground">
               Workspace name
@@ -292,7 +327,7 @@ export function AddWorkspaceStep_ConnectRemote({
               <Input
                 value={newWorkspaceName}
                 onChange={(e) => setNewWorkspaceName(e.target.value)}
-                placeholder="My Remote Workspace"
+                placeholder={t("workspace.myRemoteWorkspace")}
                 disabled={isCreating}
                 className="border-0 bg-transparent shadow-none"
               />

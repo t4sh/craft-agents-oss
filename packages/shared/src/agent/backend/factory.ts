@@ -122,9 +122,9 @@ export function detectProvider(authType: string): AgentProvider {
  *   model: 'claude-sonnet-4-6',
  * });
  *
- * // Create Codex backend (uses app-server mode)
- * const codexBackend = createBackend({
- *   provider: 'openai',
+ * // Create Pi backend (routes OpenAI / Copilot / Bedrock / etc. via Pi SDK)
+ * const piBackend = createBackend({
+ *   provider: 'pi',
  *   workspace: myWorkspace,
  * });
  * ```
@@ -190,7 +190,7 @@ export function createBackendFromResolvedContext(args: {
 
 /**
  * Initialize backend host runtime wiring once at app startup.
- * Keeps runtime/bootstrap details (Codex vendor root, Claude SDK executable/interceptor)
+ * Keeps runtime/bootstrap details (Claude SDK executable, Pi interceptor bundle)
  * behind backend internals.
  */
 export function initializeBackendHostRuntime(args: {
@@ -243,21 +243,18 @@ export function isProviderAvailable(provider: AgentProvider): boolean {
  *
  * AgentProvider determines which backend class to instantiate:
  * - 'anthropic' → ClaudeAgent
- * - 'openai' → CodexAgent
+ * - 'pi' → PiAgent
  *
  * @param providerType - The full provider type from LLM connection
  * @returns The agent provider for SDK selection
  */
 export function providerTypeToAgentProvider(providerType: LlmProviderType): AgentProvider {
   switch (providerType) {
-    // Anthropic SDK backends
+    // Anthropic SDK backend (direct API only)
     case 'anthropic':
-    case 'anthropic_compat':
-    case 'bedrock':    // Bedrock uses Anthropic SDK with different auth
-    case 'vertex':     // Vertex uses Anthropic SDK with different auth
       return 'anthropic';
 
-    // Pi backends
+    // Pi backends (includes former bedrock/vertex/anthropic_compat via migration)
     case 'pi':
     case 'pi_compat':
       return 'pi';
@@ -408,7 +405,7 @@ export function resolveSetupTestConnectionHint(args: {
   }
 
   return {
-    providerType: args.baseUrl ? 'anthropic_compat' : 'anthropic',
+    providerType: args.baseUrl ? 'pi_compat' : 'anthropic',
   };
 }
 
@@ -697,7 +694,7 @@ export async function testBackendConnection(args: {
     const providerType = args.connection?.providerType ?? getDefaultProviderType(args.provider);
     const now = Date.now();
     const authType: LlmAuthType = (
-      providerType === 'anthropic_compat' || providerType === 'pi_compat'
+      providerType === 'pi_compat'
     )
       ? 'api_key_with_endpoint'
       : 'api_key';
@@ -757,18 +754,36 @@ export async function testBackendConnection(args: {
       providerOptions: { piAuthProvider: args.connection?.piAuthProvider },
     });
 
+    const readAgentStderr = (): string => {
+      const maybe = agent as unknown as { getRecentStderr?: () => string };
+      return typeof maybe.getRecentStderr === 'function' ? maybe.getRecentStderr() : '';
+    };
+    const withStderrContext = (message: string): string => {
+      const stderr = readAgentStderr();
+      if (!stderr) return `${message} (subprocess produced no stderr output)`;
+      return `${message}\n--- subprocess stderr (last ~8KB) ---\n${stderr}`;
+    };
+
     try {
       const timeoutMs = args.timeoutMs ?? 20000;
       const text = await Promise.race([
         agent.runMiniCompletion('Say ok'),
         new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error('Connection test timed out')), timeoutMs)
+          setTimeout(
+            () => reject(new Error(withStderrContext(`Connection test timed out after ${timeoutMs}ms`))),
+            timeoutMs
+          )
         ),
       ]);
 
       return text
         ? { success: true }
         : { success: false, error: 'No response from provider. Check your API key.' };
+    } catch (error) {
+      const base = error instanceof Error ? error.message : String(error);
+      // Avoid double-appending if the timeout branch already included stderr context.
+      const enriched = base.includes('subprocess stderr') ? base : withStderrContext(base);
+      return { success: false, error: enriched };
     } finally {
       agent.destroy();
     }

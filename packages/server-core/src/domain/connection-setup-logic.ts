@@ -8,8 +8,10 @@
 import type { ModelDefinition } from '@craft-agent/shared/config/models'
 import {
   type LlmConnection,
+  type CustomEndpointApi,
   getDefaultModelsForConnection,
   getDefaultModelForConnection,
+  defaultMidStreamBehavior,
 } from '@craft-agent/shared/config'
 
 // ============================================================
@@ -91,6 +93,36 @@ export function setupTestRequiresApiKey(baseUrl?: string): boolean {
   return !isLoopbackBaseUrl(baseUrl)
 }
 
+/**
+ * Decide how a custom OpenAI/Anthropic-compatible endpoint should be persisted.
+ *
+ * - Loopback URL with no credential → keyless local model (Ollama, LM Studio).
+ * - Loopback URL *with* a credential → real local OpenAI-compat server (vLLM, LiteLLM, etc.);
+ *   must be treated like a remote custom endpoint so `piAuthProvider` is set, otherwise
+ *   `getPiAuth()` returns null at runtime and chat requests fail with 401 (#636).
+ * - Remote URL → always keyed with provider hint for the correct icon.
+ *
+ * Pure: caller spreads the result into the connection updates patch.
+ */
+export function resolveCustomEndpointSetup(input: {
+  baseUrl: string | undefined
+  credential: string | undefined
+  customEndpointApi: CustomEndpointApi
+}): {
+  authType: Extract<LlmConnection['authType'], 'none' | 'api_key_with_endpoint'>
+  name?: 'Local Model'
+  piAuthProvider?: 'openai' | 'anthropic'
+} {
+  const isKeylessLoopback = isLoopbackBaseUrl(input.baseUrl) && !input.credential
+  if (isKeylessLoopback) {
+    return { authType: 'none', name: 'Local Model' }
+  }
+  return {
+    authType: 'api_key_with_endpoint',
+    piAuthProvider: input.customEndpointApi === 'anthropic-messages' ? 'anthropic' : 'openai',
+  }
+}
+
 // ============================================================
 // Built-in Connection Templates
 // ============================================================
@@ -107,7 +139,7 @@ export const BUILT_IN_CONNECTION_TEMPLATES: Record<string, {
 }> = {
   'anthropic-api': {
     name: (h) => h ? 'Custom Anthropic-Compatible' : 'Anthropic (API Key)',
-    providerType: (h) => h ? 'anthropic_compat' : 'anthropic',
+    providerType: (h) => h ? 'pi_compat' : 'anthropic',
     authType: (h) => h ? 'api_key_with_endpoint' : 'api_key',
   },
   'claude-max': {
@@ -207,6 +239,7 @@ export function createBuiltInConnection(slug: string, baseUrl?: string | null): 
     defaultModel: getDefaultModelForConnection(providerType, template.piAuthProvider),
     modelSelectionMode: providerType === 'pi' ? 'automaticallySyncedFromProvider' : undefined,
     piAuthProvider: template.piAuthProvider,
+    midStreamBehavior: defaultMidStreamBehavior(providerType),
     createdAt: Date.now(),
   }
 }
